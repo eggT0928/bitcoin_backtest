@@ -16,10 +16,37 @@ import streamlit as st
 
 
 st.set_page_config(
-    page_title="BTC 이동평균 전략 비교",
+    page_title="BTC 5·20·65 / 120일선 전략 비교",
     page_icon="₿",
     layout="wide",
 )
+
+
+# =========================
+# 전략 파라미터
+# =========================
+
+BASE_MA = 120
+FAST_MA = 5
+MID_MA = 20
+SLOW_MA = 65
+
+SIGNAL_MAS = [FAST_MA, MID_MA, SLOW_MA]
+ALL_MAS = SIGNAL_MAS + [BASE_MA]
+
+BUY_TARGETS = {
+    FAST_MA: 0.50,
+    MID_MA: 0.75,
+    SLOW_MA: 1.00,
+}
+
+SELL_LIMITS = {
+    FAST_MA: 0.50,
+    MID_MA: 0.25,
+    SLOW_MA: 0.00,
+}
+
+BUYHOLD_LABEL = "BTC Buy & Hold"
 
 
 # =========================
@@ -29,7 +56,7 @@ st.set_page_config(
 STRATEGIES = {
     "original": {
         "label": "원안 전략",
-        "description": "5/25/99일선 상향 돌파로 분할매수, 5일선 하향 돌파 시 전량 매도",
+        "description": "5/20/65일선이 120일선을 상향 돌파할 때 분할매수, 5일선 하향 돌파 시 전량 매도",
         "sell_mode": "original",
         "confirm_days": 1,
         "buffer_pct": 0.0,
@@ -37,7 +64,7 @@ STRATEGIES = {
     },
     "improved": {
         "label": "개선 매도 전략",
-        "description": "매수는 원안 유지, 5일선 하락 50%, 25일선 하락 25%, 99일선 하락 0%",
+        "description": "5/20/65일선이 120일선을 상향 돌파할 때 분할매수, 5일선 하락 50%, 20일선 하락 25%, 65일선 하락 0%",
         "sell_mode": "partial",
         "confirm_days": 1,
         "buffer_pct": 0.0,
@@ -45,7 +72,7 @@ STRATEGIES = {
     },
     "confirm2": {
         "label": "개선+2일 확인",
-        "description": "개선 매도 전략에 2일 연속 확인 규칙 추가",
+        "description": "5/20/65 개선 매도 전략에 2일 연속 확인 규칙 추가",
         "sell_mode": "partial",
         "confirm_days": 2,
         "buffer_pct": 0.0,
@@ -53,7 +80,7 @@ STRATEGIES = {
     },
     "buffer1": {
         "label": "개선+1% 완충",
-        "description": "120일선 기준 ±1% 완충 구간을 두고 돌파 인정",
+        "description": "5/20/65 개선 매도 전략에 120일선 기준 ±1% 완충 구간 적용",
         "sell_mode": "partial",
         "confirm_days": 1,
         "buffer_pct": 0.01,
@@ -61,7 +88,7 @@ STRATEGIES = {
     },
     "confirm2_buffer1": {
         "label": "개선+2일+1% 완충",
-        "description": "2일 연속 확인과 ±1% 완충 구간을 함께 적용",
+        "description": "5/20/65 개선 매도 전략에 2일 연속 확인과 ±1% 완충 구간을 함께 적용",
         "sell_mode": "partial",
         "confirm_days": 2,
         "buffer_pct": 0.01,
@@ -69,15 +96,13 @@ STRATEGIES = {
     },
     "weekly": {
         "label": "개선+주 1회 판단",
-        "description": "개선 매도 전략을 매주 일요일 종가 기준으로만 판단",
+        "description": "5/20/65 개선 매도 전략을 매주 일요일 종가 기준으로만 판단",
         "sell_mode": "partial",
         "confirm_days": 1,
         "buffer_pct": 0.0,
         "frequency": "weekly",
     },
 }
-
-BUYHOLD_LABEL = "BTC Buy & Hold"
 
 
 # =========================
@@ -127,7 +152,7 @@ def add_moving_averages(df: pd.DataFrame) -> pd.DataFrame:
     """
     out = df.copy()
 
-    for n in [5, 25, 99, 120]:
+    for n in ALL_MAS:
         out[f"ma{n}"] = out["close"].rolling(n).mean()
 
     return out
@@ -157,15 +182,15 @@ def add_cross_signals(
     상향/하향 돌파 신호를 계산합니다.
 
     buffer_pct=0.01이면:
-    - 상향 돌파 인정 기준: 단기선 > 120일선 * 1.01
-    - 하향 돌파 인정 기준: 단기선 < 120일선 * 0.99
+    - 상향 돌파 인정 기준: 단기선 > 기준선 * 1.01
+    - 하향 돌파 인정 기준: 단기선 < 기준선 * 0.99
     - 그 사이 구간은 기존 비중 유지
     """
     out = df.copy()
-    upper = out["ma120"] * (1.0 + buffer_pct)
-    lower = out["ma120"] * (1.0 - buffer_pct)
+    upper = out[f"ma{BASE_MA}"] * (1.0 + buffer_pct)
+    lower = out[f"ma{BASE_MA}"] * (1.0 - buffer_pct)
 
-    for n in [5, 25, 99]:
+    for n in SIGNAL_MAS:
         up_state = out[f"ma{n}"] > upper
         down_state = out[f"ma{n}"] < lower
 
@@ -181,18 +206,15 @@ def initial_position_from_state(row: pd.Series, buffer_pct: float = 0.0) -> floa
     """
     백테스트 시작일에 이미 조건이 충족되어 있으면 현재 상태에 맞춰 초기 비중을 설정합니다.
     """
-    if pd.isna(row["ma120"]):
+    if pd.isna(row[f"ma{BASE_MA}"]):
         return 0.0
 
-    upper = row["ma120"] * (1.0 + buffer_pct)
+    upper = row[f"ma{BASE_MA}"] * (1.0 + buffer_pct)
     position = 0.0
 
-    if row["ma5"] > upper:
-        position = 0.50
-    if row["ma25"] > upper:
-        position = 0.75
-    if row["ma99"] > upper:
-        position = 1.00
+    for n in SIGNAL_MAS:
+        if row[f"ma{n}"] > upper:
+            position = max(position, BUY_TARGETS[n])
 
     return position
 
@@ -204,13 +226,17 @@ def calculate_event_position(
 ) -> pd.Series:
     """
     일봉 또는 주봉 신호 데이터에서 전략 비중을 계산합니다.
+
+    보수형 처리:
+    - 65일선이 120일선을 하향 돌파한 날은 중기 추세 훼손으로 보고 당일 매수 신호를 무시합니다.
+    - 원안 전략에서 5일선 하향 돌파로 전량 매도한 날도 당일 매수 신호를 무시합니다.
     """
     positions = []
     position = 0.0
     initialized = False
 
     for _, row in signal_df.iterrows():
-        if pd.isna(row["ma120"]):
+        if pd.isna(row[f"ma{BASE_MA}"]):
             positions.append(0.0)
             continue
 
@@ -218,27 +244,29 @@ def calculate_event_position(
             position = initial_position_from_state(row, buffer_pct)
             initialized = True
 
+        major_risk_off = False
+
         # 매도 신호를 먼저 반영합니다.
         if sell_mode == "original":
-            if row["cross_down_5"]:
+            if row[f"cross_down_{FAST_MA}"]:
                 position = 0.0
+                major_risk_off = True
         elif sell_mode == "partial":
-            if row["cross_down_99"]:
-                position = 0.0
-            elif row["cross_down_25"]:
-                position = min(position, 0.25)
-            elif row["cross_down_5"]:
-                position = min(position, 0.50)
+            if row[f"cross_down_{SLOW_MA}"]:
+                position = SELL_LIMITS[SLOW_MA]
+                major_risk_off = True
+            elif row[f"cross_down_{MID_MA}"]:
+                position = min(position, SELL_LIMITS[MID_MA])
+            elif row[f"cross_down_{FAST_MA}"]:
+                position = min(position, SELL_LIMITS[FAST_MA])
         else:
             raise ValueError(f"알 수 없는 sell_mode입니다: {sell_mode}")
 
-        # 매수 신호를 반영합니다.
-        if row["cross_up_5"]:
-            position = max(position, 0.50)
-        if row["cross_up_25"]:
-            position = max(position, 0.75)
-        if row["cross_up_99"]:
-            position = max(position, 1.00)
+        # 큰 위험 회피 신호가 나온 날에는 당일 매수 신호를 무시합니다.
+        if not major_risk_off:
+            for n in SIGNAL_MAS:
+                if row[f"cross_up_{n}"]:
+                    position = max(position, BUY_TARGETS[n])
 
         positions.append(position)
 
@@ -538,11 +566,17 @@ def make_position_chart(position_panel: pd.DataFrame, selected_labels: list[str]
 # 앱 본문
 # =========================
 
-st.title("₿ BTC 이동평균 전략 비교 대시보드")
+st.title("₿ BTC 5·20·65 / 120일선 전략 비교 대시보드")
 
 st.markdown(
     """
-    원안 전략, 개선 매도 전략, 휩쏘 완화 전략들, 그리고 매수 후 보유를 한 번에 비교합니다.
+    120일선을 기준선으로 두고, **5일선·20일선·65일선**이 기준선을 돌파하는지에 따라
+    분할 진입·분할 청산하는 전략을 비교합니다.
+
+    - **5일선**: 빠른 진입/축소 신호
+    - **20일선**: 논문 VMA(20,120)에 가까운 확인 신호
+    - **65일선**: 중기 추세 확인 신호
+    - **120일선**: 장기 추세 기준선
 
     **체리피킹을 줄이기 위해 단순한 후보만 비교합니다.**
     2일 확인, 1% 완충, 2일+1% 완충, 주 1회 판단처럼 사전에 정한 규칙만 비교합니다.
@@ -563,6 +597,19 @@ with st.expander("전략 규칙 보기", expanded=False):
         ]
     )
     st.dataframe(strategy_info, use_container_width=True)
+
+with st.expander("기본 비중 규칙 보기", expanded=False):
+    weight_rule = pd.DataFrame(
+        [
+            {"구분": "매수", "조건": "5일선 > 120일선", "목표/제한 비중": "50%"},
+            {"구분": "매수", "조건": "20일선 > 120일선", "목표/제한 비중": "75%"},
+            {"구분": "매수", "조건": "65일선 > 120일선", "목표/제한 비중": "100%"},
+            {"구분": "매도", "조건": "5일선 < 120일선", "목표/제한 비중": "최대 50%"},
+            {"구분": "매도", "조건": "20일선 < 120일선", "목표/제한 비중": "최대 25%"},
+            {"구분": "매도", "조건": "65일선 < 120일선", "목표/제한 비중": "0%"},
+        ]
+    )
+    st.dataframe(weight_rule, use_container_width=True)
 
 with st.sidebar:
     st.header("백테스트 설정")
@@ -602,7 +649,7 @@ try:
     df = add_moving_averages(raw)
 
     if trim_to_signal:
-        df = df.dropna(subset=["ma120"]).copy()
+        df = df.dropna(subset=[f"ma{BASE_MA}"]).copy()
 
     if df.empty:
         st.error("120일 이동평균 계산 이후 사용할 수 있는 데이터가 없습니다.")
@@ -645,7 +692,10 @@ try:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("기준일", str(df.index[-1].date()))
     col2.metric("BTC 종가", f"{latest['close']:,.2f}")
-    col3.metric("5일선 / 120일선", f"{latest['ma5']:,.0f} / {latest['ma120']:,.0f}")
+    col3.metric(
+        "5/20/65/120일선",
+        f"{latest['ma5']:,.0f} / {latest['ma20']:,.0f} / {latest['ma65']:,.0f} / {latest['ma120']:,.0f}",
+    )
     col4.metric("거래비용", f"{fee_rate:.2%}")
 
     st.subheader("현재 전략별 투자 비중")
@@ -672,7 +722,7 @@ try:
     st.subheader("최근 일별 데이터")
     daily_panel = pd.concat(
         [
-            df[["close", "ma5", "ma25", "ma99", "ma120"]],
+            df[["close", "ma5", "ma20", "ma65", "ma120"]],
             position_panel.add_suffix("_position"),
             equity_panel.add_suffix("_equity"),
             return_panel.add_suffix("_return"),
