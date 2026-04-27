@@ -1,5 +1,5 @@
 """
-Streamlit dashboard for BTC moving-average backtest variants.
+Streamlit dashboard for BTC moving-average and momentum hybrid backtest variants.
 
 실행:
 streamlit run app.py
@@ -16,7 +16,7 @@ import streamlit as st
 
 
 st.set_page_config(
-    page_title="BTC 5·20·65 / 120일선 전략 비교",
+    page_title="BTC 추세추종·모멘텀 전략 비교",
     page_icon="₿",
     layout="wide",
 )
@@ -30,6 +30,7 @@ BASE_MA = 120
 FAST_MA = 5
 MID_MA = 20
 SLOW_MA = 65
+PRICE_MOMENTUM_DAYS = 65
 
 SIGNAL_MAS = [FAST_MA, MID_MA, SLOW_MA]
 ALL_MAS = SIGNAL_MAS + [BASE_MA]
@@ -46,6 +47,23 @@ SELL_LIMITS = {
     SLOW_MA: 0.00,
 }
 
+SCORE_POSITION_MAPS = {
+    "linear": {
+        0: 0.00,
+        1: 0.25,
+        2: 0.50,
+        3: 0.75,
+        4: 1.00,
+    },
+    "conservative": {
+        0: 0.00,
+        1: 0.00,
+        2: 0.50,
+        3: 0.75,
+        4: 1.00,
+    },
+}
+
 BUYHOLD_LABEL = "BTC Buy & Hold"
 
 
@@ -57,6 +75,7 @@ STRATEGIES = {
     "original": {
         "label": "원안 전략",
         "description": "5/20/65일선이 120일선을 상향 돌파할 때 분할매수, 5일선 하향 돌파 시 전량 매도",
+        "strategy_type": "event",
         "sell_mode": "original",
         "confirm_days": 1,
         "buffer_pct": 0.0,
@@ -65,6 +84,7 @@ STRATEGIES = {
     "improved": {
         "label": "개선 매도 전략",
         "description": "5/20/65일선이 120일선을 상향 돌파할 때 분할매수, 5일선 하락 50%, 20일선 하락 25%, 65일선 하락 0%",
+        "strategy_type": "event",
         "sell_mode": "partial",
         "confirm_days": 1,
         "buffer_pct": 0.0,
@@ -73,6 +93,7 @@ STRATEGIES = {
     "confirm2": {
         "label": "개선+2일 확인",
         "description": "5/20/65 개선 매도 전략에 2일 연속 확인 규칙 추가",
+        "strategy_type": "event",
         "sell_mode": "partial",
         "confirm_days": 2,
         "buffer_pct": 0.0,
@@ -81,6 +102,7 @@ STRATEGIES = {
     "buffer1": {
         "label": "개선+1% 완충",
         "description": "5/20/65 개선 매도 전략에 120일선 기준 ±1% 완충 구간 적용",
+        "strategy_type": "event",
         "sell_mode": "partial",
         "confirm_days": 1,
         "buffer_pct": 0.01,
@@ -89,6 +111,7 @@ STRATEGIES = {
     "confirm2_buffer1": {
         "label": "개선+2일+1% 완충",
         "description": "5/20/65 개선 매도 전략에 2일 연속 확인과 ±1% 완충 구간을 함께 적용",
+        "strategy_type": "event",
         "sell_mode": "partial",
         "confirm_days": 2,
         "buffer_pct": 0.01,
@@ -97,10 +120,29 @@ STRATEGIES = {
     "weekly": {
         "label": "개선+주 1회 판단",
         "description": "5/20/65 개선 매도 전략을 매주 일요일 종가 기준으로만 판단",
+        "strategy_type": "event",
         "sell_mode": "partial",
         "confirm_days": 1,
         "buffer_pct": 0.0,
         "frequency": "weekly",
+    },
+    "hybrid_score": {
+        "label": "하이브리드 점수 전략",
+        "description": "5일선>120일선, 20일선>120일선, 65일선>120일선, 현재가>65일 전 가격을 각각 1점으로 계산해 점수×25% 투자",
+        "strategy_type": "score",
+        "score_mode": "linear",
+        "confirm_days": 1,
+        "buffer_pct": 0.0,
+        "frequency": "daily",
+    },
+    "hybrid_score_conservative": {
+        "label": "하이브리드 보수형 점수 전략",
+        "description": "4점 모멘텀 점수 중 0~1점은 현금, 2점 50%, 3점 75%, 4점 100% 투자",
+        "strategy_type": "score",
+        "score_mode": "conservative",
+        "confirm_days": 1,
+        "buffer_pct": 0.0,
+        "frequency": "daily",
     },
 }
 
@@ -143,7 +185,7 @@ def download_price_data(
 
 
 # =========================
-# 이동평균 및 신호
+# 이동평균, 모멘텀 점수 및 신호
 # =========================
 
 def add_moving_averages(df: pd.DataFrame) -> pd.DataFrame:
@@ -156,6 +198,46 @@ def add_moving_averages(df: pd.DataFrame) -> pd.DataFrame:
         out[f"ma{n}"] = out["close"].rolling(n).mean()
 
     return out
+
+
+def add_momentum_score(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    5/20/65일선과 120일선, 65일 가격 모멘텀을 이용해 0~4점 모멘텀 점수를 계산합니다.
+
+    점수 조건:
+    - 5일선 > 120일선: +1점
+    - 20일선 > 120일선: +1점
+    - 65일선 > 120일선: +1점
+    - 현재가 > 65일 전 가격: +1점
+    """
+    out = df.copy()
+
+    out["score_ma5_120"] = (out[f"ma{FAST_MA}"] > out[f"ma{BASE_MA}"]).astype(int)
+    out["score_ma20_120"] = (out[f"ma{MID_MA}"] > out[f"ma{BASE_MA}"]).astype(int)
+    out["score_ma65_120"] = (out[f"ma{SLOW_MA}"] > out[f"ma{BASE_MA}"]).astype(int)
+    out["score_price_65"] = (out["close"] > out["close"].shift(PRICE_MOMENTUM_DAYS)).astype(int)
+
+    out["momentum_score"] = (
+        out["score_ma5_120"]
+        + out["score_ma20_120"]
+        + out["score_ma65_120"]
+        + out["score_price_65"]
+    )
+
+    return out
+
+
+def calculate_score_position(df: pd.DataFrame, score_mode: str) -> pd.Series:
+    """
+    모멘텀 점수에 따라 투자 비중을 계산합니다.
+    """
+    if score_mode not in SCORE_POSITION_MAPS:
+        raise ValueError(f"알 수 없는 score_mode입니다: {score_mode}")
+
+    score_df = add_momentum_score(df)
+    position = score_df["momentum_score"].map(SCORE_POSITION_MAPS[score_mode])
+
+    return position.fillna(0.0).clip(lower=0.0, upper=1.0)
 
 
 def state_signal(state: pd.Series, confirm_days: int) -> pd.Series:
@@ -277,6 +359,11 @@ def calculate_strategy_position(df: pd.DataFrame, config: dict) -> pd.Series:
     """
     전략 설정값에 따라 일별 투자 비중을 계산합니다.
     """
+    strategy_type = config.get("strategy_type", "event")
+
+    if strategy_type == "score":
+        return calculate_score_position(df, score_mode=config["score_mode"]).reindex(df.index).fillna(0.0)
+
     frequency = config["frequency"]
     confirm_days = config["confirm_days"]
     buffer_pct = config["buffer_pct"]
@@ -562,24 +649,50 @@ def make_position_chart(position_panel: pd.DataFrame, selected_labels: list[str]
     return fig
 
 
+def make_score_chart(score_df: pd.DataFrame) -> go.Figure:
+    """
+    하이브리드 모멘텀 점수 그래프를 만듭니다.
+    """
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=score_df.index,
+            y=score_df["momentum_score"],
+            mode="lines",
+            name="모멘텀 점수",
+        )
+    )
+
+    fig.update_layout(
+        title="하이브리드 모멘텀 점수, 0~4점",
+        xaxis_title="날짜",
+        yaxis_title="점수",
+        yaxis=dict(range=[-0.1, 4.1], dtick=1),
+        hovermode="x unified",
+        height=320,
+    )
+
+    return fig
+
+
 # =========================
 # 앱 본문
 # =========================
 
-st.title("₿ BTC 5·20·65 / 120일선 전략 비교 대시보드")
+st.title("₿ BTC 추세추종·65일 모멘텀 하이브리드 전략 비교")
 
 st.markdown(
     """
-    120일선을 기준선으로 두고, **5일선·20일선·65일선**이 기준선을 돌파하는지에 따라
-    분할 진입·분할 청산하는 전략을 비교합니다.
+    120일선을 기준선으로 두는 **5·20·65 이동평균 추세추종 전략**과,
+    여기에 **65일 가격 모멘텀**을 섞은 하이브리드 점수 전략을 함께 비교합니다.
 
-    - **5일선**: 빠른 진입/축소 신호
-    - **20일선**: 논문 VMA(20,120)에 가까운 확인 신호
-    - **65일선**: 중기 추세 확인 신호
-    - **120일선**: 장기 추세 기준선
+    하이브리드 점수 전략은 아래 4가지 조건을 각각 1점으로 계산합니다.
 
-    **체리피킹을 줄이기 위해 단순한 후보만 비교합니다.**
-    2일 확인, 1% 완충, 2일+1% 완충, 주 1회 판단처럼 사전에 정한 규칙만 비교합니다.
+    - **5일선 > 120일선**: 단기 반등/추세 점수
+    - **20일선 > 120일선**: 확인 추세 점수
+    - **65일선 > 120일선**: 중기 추세 점수
+    - **현재가 > 65일 전 가격**: 논문식 65일 가격 모멘텀 점수
     """
 )
 
@@ -589,16 +702,29 @@ with st.expander("전략 규칙 보기", expanded=False):
             {
                 "전략": cfg["label"],
                 "설명": cfg["description"],
-                "확인일수": cfg["confirm_days"],
-                "완충구간": f"{cfg['buffer_pct']:.1%}",
-                "판단주기": "매일" if cfg["frequency"] == "daily" else "주 1회",
+                "유형": "점수형" if cfg.get("strategy_type") == "score" else "돌파형",
+                "확인일수": cfg.get("confirm_days", ""),
+                "완충구간": f"{cfg.get('buffer_pct', 0.0):.1%}",
+                "판단주기": "매일" if cfg.get("frequency") == "daily" else "주 1회",
             }
             for cfg in STRATEGIES.values()
         ]
     )
     st.dataframe(strategy_info, use_container_width=True)
 
-with st.expander("기본 비중 규칙 보기", expanded=False):
+with st.expander("하이브리드 점수 비중 규칙 보기", expanded=False):
+    score_rule = pd.DataFrame(
+        [
+            {"점수": "0점", "기본형 비중": "0%", "보수형 비중": "0%"},
+            {"점수": "1점", "기본형 비중": "25%", "보수형 비중": "0%"},
+            {"점수": "2점", "기본형 비중": "50%", "보수형 비중": "50%"},
+            {"점수": "3점", "기본형 비중": "75%", "보수형 비중": "75%"},
+            {"점수": "4점", "기본형 비중": "100%", "보수형 비중": "100%"},
+        ]
+    )
+    st.dataframe(score_rule, use_container_width=True)
+
+with st.expander("기존 5·20·65 / 120일선 돌파형 비중 규칙 보기", expanded=False):
     weight_rule = pd.DataFrame(
         [
             {"구분": "매수", "조건": "5일선 > 120일선", "목표/제한 비중": "50%"},
@@ -629,11 +755,10 @@ with st.sidebar:
     st.divider()
     st.caption("그래프에 표시할 전략")
     default_graph_labels = [
-        "원안 전략",
         "개선 매도 전략",
-        "개선+2일 확인",
-        "개선+1% 완충",
         "개선+주 1회 판단",
+        "하이브리드 점수 전략",
+        "하이브리드 보수형 점수 전략",
         BUYHOLD_LABEL,
     ]
     selected_labels = st.multiselect(
@@ -654,6 +779,8 @@ try:
     if df.empty:
         st.error("120일 이동평균 계산 이후 사용할 수 있는 데이터가 없습니다.")
         st.stop()
+
+    score_df = add_momentum_score(df)
 
     backtests = {}
     metrics = {}
@@ -687,16 +814,29 @@ try:
     display_metrics = make_display_metrics(metrics_df)
 
     latest = df.iloc[-1]
+    latest_score = score_df.iloc[-1]
     latest_positions = position_panel.iloc[-1]
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("기준일", str(df.index[-1].date()))
     col2.metric("BTC 종가", f"{latest['close']:,.2f}")
     col3.metric(
         "5/20/65/120일선",
         f"{latest['ma5']:,.0f} / {latest['ma20']:,.0f} / {latest['ma65']:,.0f} / {latest['ma120']:,.0f}",
     )
-    col4.metric("거래비용", f"{fee_rate:.2%}")
+    col4.metric("현재 모멘텀 점수", f"{int(latest_score['momentum_score'])} / 4점")
+    col5.metric("거래비용", f"{fee_rate:.2%}")
+
+    st.subheader("현재 모멘텀 점수 세부 조건")
+    current_score_detail = pd.DataFrame(
+        [
+            {"조건": "5일선 > 120일선", "충족 여부": "예" if latest_score["score_ma5_120"] == 1 else "아니오", "점수": int(latest_score["score_ma5_120"])},
+            {"조건": "20일선 > 120일선", "충족 여부": "예" if latest_score["score_ma20_120"] == 1 else "아니오", "점수": int(latest_score["score_ma20_120"])},
+            {"조건": "65일선 > 120일선", "충족 여부": "예" if latest_score["score_ma65_120"] == 1 else "아니오", "점수": int(latest_score["score_ma65_120"])},
+            {"조건": "현재가 > 65일 전 가격", "충족 여부": "예" if latest_score["score_price_65"] == 1 else "아니오", "점수": int(latest_score["score_price_65"])},
+        ]
+    )
+    st.dataframe(current_score_detail, use_container_width=True)
 
     st.subheader("현재 전략별 투자 비중")
     current_position_df = pd.DataFrame(
@@ -719,10 +859,14 @@ try:
     st.subheader("투자 비중 변화")
     st.plotly_chart(make_position_chart(position_panel, selected_labels), use_container_width=True)
 
+    st.subheader("하이브리드 모멘텀 점수 변화")
+    st.plotly_chart(make_score_chart(score_df), use_container_width=True)
+
     st.subheader("최근 일별 데이터")
     daily_panel = pd.concat(
         [
             df[["close", "ma5", "ma20", "ma65", "ma120"]],
+            score_df[["score_ma5_120", "score_ma20_120", "score_ma65_120", "score_price_65", "momentum_score"]],
             position_panel.add_suffix("_position"),
             equity_panel.add_suffix("_equity"),
             return_panel.add_suffix("_return"),
