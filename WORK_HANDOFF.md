@@ -64,7 +64,7 @@ Secret 값은 Cloudflare에만 저장되며 저장소와 대화에 노출하지 
   - MA120 `68360.31083333334`
   - Binance REST 원본과 D1 계산값 일치
 
-Telegram API는 전송 성공을 반환했고, 사용자 화면에서 실제 메시지 확인만 마지막으로 기록하면 된다.
+Telegram API 전송 성공 후 사용자가 `@BTC_checker_bot`에서 `✅ BTC 추세 모니터링 시작` 메시지의 실제 수신을 확인했다.
 
 ## 시세 연결 메모
 
@@ -74,9 +74,9 @@ Cloudflare 서버 IP에서 Binance REST 및 WebSocket API 요청은 지역 제�
 
 Google Cloud 프로젝트 `btc-telegram-alerts-260825`와 Firestore는 작업 중 생성됐으나 Billing을 연결하지 않았고 Functions도 배포하지 않았다. 운영에는 사용하지 않는다. 로컬 Firebase 배포 구성은 제거했으며 `firebase/README.md`에는 전환 사실만 남겼다.
 
-## 남은 마무리
+## 완료 상태
 
-1. 사용자가 Telegram 시작 메시지를 실제 화면에서 확인했는지 기록한다.
-2. 최종 보안 검색과 git diff를 검토한다.
-3. PR #1 제목/본문을 Cloudflare 운영 구조에 맞게 갱신하고 검증 근거를 남긴다.
-4. 모든 조건 확인 후에만 `main`에 병합한다.
+- Telegram 실제 수신 확인 완료
+- 최종 보안 검색 및 git diff 검토 완료
+- PR #1 제목과 본문을 Cloudflare 운영 구조로 갱신 완료
+- 최종 테스트와 배포 검증 후 `main` 병합 진행
