@@ -1,5 +1,3 @@
-"use strict";
-
 const SIGNAL_MAS = [5, 20, 65];
 const ALL_MAS = [5, 20, 65, 120];
 const BUY_TARGETS = { 5: 0.5, 20: 0.75, 65: 1.0 };
@@ -76,7 +74,7 @@ function startupEvent(live) {
       "✅ BTC 추세 모니터링 시작\n" +
       "BTCUSDT / 1분 감시\n" +
       "MA5·20·65 vs MA120\n" +
-      `Firebase 연결 정상 · 현재가 ${fmt(live.price)}`,
+      `Cloudflare 연결 정상 · 현재가 ${fmt(live.price)}`,
   };
 }
 
@@ -149,6 +147,7 @@ function liveFields(live) {
     ma65: live.mas[65],
     ma120: live.mas[120],
     candleCloseTime: live.candleCloseTime,
+    dataSource: live.dataSource || "binance-global",
   };
 }
 
@@ -247,7 +246,7 @@ async function deliverClaimedEvent(event, { send, markSent, markRetry }) {
   }
 }
 
-module.exports = {
+export {
   ALL_MAS,
   BUY_TARGETS,
   SELL_LIMITS,

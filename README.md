@@ -2,6 +2,12 @@
 
 비트코인 이동평균 전략을 표와 그래프로 확인하는 Streamlit 대시보드입니다.
 
+## Telegram 실시간 알림
+
+Binance BTCUSDT 일봉의 MA5·20·65와 MA120 교차를 1분마다 확인하는 Telegram 알림 서비스가 Cloudflare Workers + D1에 배포되어 있습니다. 자동 주문은 하지 않습니다.
+
+배포 구조와 운영 방법은 [`cloudflare/README.md`](cloudflare/README.md)를 확인하세요.
+
 ## 비교 전략
 
 | 전략 | 핵심 규칙 |

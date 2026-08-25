@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "btc-telegram-alerts",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-25",
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "btc-telegram-alerts",
+      "database_id": "8ece5f02-d4bd-4476-a31a-8cb80aec593b"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

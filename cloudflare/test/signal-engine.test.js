@@ -1,8 +1,11 @@
-"use strict";
-
-const test = require("node:test");
-const assert = require("node:assert/strict");
-const { applyPositionEvents, calcSnapshot, deliverClaimedEvent, processMinute } = require("../signal-engine");
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  applyPositionEvents,
+  calcSnapshot,
+  deliverClaimedEvent,
+  processMinute,
+} from "../src/signal-engine.js";
 
 const MINUTES = ["2026-08-25T00:00", "2026-08-25T00:01", "2026-08-25T00:02", "2026-08-25T00:03"];
 
@@ -61,18 +64,22 @@ test("4, 5. 3회 연속 유지 시 확인 알림 1회 후 추가 중복 없음",
 
 test("6~10. app.py 이벤트 기반 부분매도 비중 전이와 일치한다", () => {
   let position = 0;
-  position = applyPositionEvents(position, [{ period: 5, direction: true }]);
-  assert.equal(position, 0.5);
-  position = applyPositionEvents(position, [{ period: 20, direction: true }]);
-  assert.equal(position, 0.75);
-  position = applyPositionEvents(position, [{ period: 65, direction: true }]);
-  assert.equal(position, 1);
-  position = applyPositionEvents(position, [{ period: 5, direction: false }]);
-  assert.equal(position, 0.5);
-  position = applyPositionEvents(position, [{ period: 20, direction: false }]);
-  assert.equal(position, 0.25);
-  position = applyPositionEvents(position, [{ period: 65, direction: false }]);
-  assert.equal(position, 0);
+  for (const [period, direction, expected] of [
+    [5, true, 0.5], [20, true, 0.75], [65, true, 1],
+    [5, false, 0.5], [20, false, 0.25], [65, false, 0],
+  ]) {
+    position = applyPositionEvents(position, [{ period, direction }]);
+    assert.equal(position, expected);
+  }
+});
+
+test("MA20 하향 시 MA5가 위여도 실제 position은 최대 25%가 된다", () => {
+  let state = baseline(0.5, { 5: true, 20: true, 65: false });
+  const observed = { 5: true, 20: false, 65: false };
+  state = run(state, observed, 0).state;
+  state = run(state, observed, 1).state;
+  state = run(state, observed, 2).state;
+  assert.equal(state.position, 0.25);
 });
 
 test("app.py처럼 MA65 하향일에는 같은 관측의 상향 신호를 무시한다", () => {
