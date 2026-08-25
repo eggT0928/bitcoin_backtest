@@ -1,0 +1,7 @@
+cloudflare/node_modules/
+cloudflare/.dev.vars*
+cloudflare/seed.sql
+firebase/functions/node_modules/
+.wrangler/
+cloudflare/.wrangler/
+*.local

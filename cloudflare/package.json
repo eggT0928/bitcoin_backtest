@@ -1,0 +1,16 @@
+{
+  "name": "btc-telegram-alerts-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/index.js && node --check src/signal-engine.js && node --check scripts/build-seed-sql.mjs",
+    "test": "node --test test/*.test.js",
+    "seed:sql": "node scripts/build-seed-sql.mjs",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "4.125.0"
+  }
+}
