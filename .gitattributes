@@ -1,0 +1,5 @@
+# Keep data hashes stable across Windows and Linux checkouts.
+research/data/*.csv -text
+research/results/*.csv -text
+*.py text eol=lf
+research/*.md text eol=lf

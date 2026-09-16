@@ -1,0 +1,13 @@
+{
+  "provider": "Coin Metrics Community archive / BTC PriceUSD",
+  "daily_basis": "Provider UTC daily labels; unfinished UTC day excluded",
+  "fetched_at_utc": "2026-09-16T02:23:43.134396+00:00",
+  "first_date": "2014-09-17",
+  "last_date": "2026-05-23",
+  "rows": 4267,
+  "sha256": "1327d690a90275755d6e3b1420ee3d876d7f9e85110ea0c5f557f14e57b9620c",
+  "source_url": "https://raw.githubusercontent.com/coinmetrics/data/master/csv/btc.csv",
+  "raw_sha256": "06495ff8e643432e6948b7b4686ce44fc106217287dabdc1b38351d9ddec46c3",
+  "archive_commit": "f1a36afb962731c387bb03982758ab0103063da5",
+  "immutable_source_url": "https://raw.githubusercontent.com/coinmetrics/data/f1a36afb962731c387bb03982758ab0103063da5/csv/btc.csv"
+}

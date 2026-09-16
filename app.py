@@ -1,896 +1,193 @@
-"""
-Streamlit dashboard for BTC moving-average and momentum hybrid backtest variants.
-
-실행:
-streamlit run app.py
-"""
-
+"""BTC research dashboard. Run: streamlit run app.py"""
 from __future__ import annotations
-
-from typing import Optional
-
-import numpy as np
+import json
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from backtest_engine import (ROOT, DATA_PATH, LABELS, PERIODS, load_snapshot,
+                             download_prices, make_signals, run_all, slice_path, metric_table,
+                             period_table, annual_returns, drawdown)
+from legacy_signals import STRATEGIES
+
+st.set_page_config(page_title='BTC 추세추종 연구실', page_icon='₿', layout='wide')
+METRIC_NAMES = {'CAGR':'CAGR', 'MDD':'MDD', 'volatility':'연변동성', 'Sharpe':'Sharpe', 'Sortino':'Sortino',
+                'Ulcer':'Ulcer Index', 'UPI':'UPI', 'Calmar':'Calmar', 'mean_weight':'평균 투자비중',
+                'mean_cash':'평균 현금비중', 'orders':'편도 주문수', 'turnover_pa':'연 turnover (배)',
+                'recovery_max_days':'완료 회복 최장(일)', 'recovery_mean_days':'완료 회복 평균(일)',
+                'unrecovered_days':'미회복 경과(일)', 'underwater_max_days':'최장 수중기간(일)',
+                'recovered_episodes':'회복 완료 건수', 'fee_sum':'비용/NAV 합계', 'final_multiple':'최종배율',
+                'reversal_14d_count':'14일내 방향반전 수', 'reversal_14d_rate':'14일내 방향반전 비율'}
+PCT = ['CAGR','MDD','volatility','Ulcer','mean_weight','mean_cash','fee_sum','reversal_14d_rate']
 
 
-st.set_page_config(
-    page_title="BTC 추세추종·모멘텀 전략 비교",
-    page_icon="₿",
-    layout="wide",
-)
+@st.cache_data(show_spinner=False)
+def snapshot():
+    return load_snapshot()
 
 
-# =========================
-# 전략 파라미터
-# =========================
-
-BASE_MA = 120
-FAST_MA = 5
-MID_MA = 20
-SLOW_MA = 65
-PRICE_MOMENTUM_DAYS = 65
-
-SIGNAL_MAS = [FAST_MA, MID_MA, SLOW_MA]
-ALL_MAS = SIGNAL_MAS + [BASE_MA]
-
-BUY_TARGETS = {
-    FAST_MA: 0.50,
-    MID_MA: 0.75,
-    SLOW_MA: 1.00,
-}
-
-SELL_LIMITS = {
-    FAST_MA: 0.50,
-    MID_MA: 0.25,
-    SLOW_MA: 0.00,
-}
-
-SCORE_POSITION_MAPS = {
-    "linear": {
-        0: 0.00,
-        1: 0.25,
-        2: 0.50,
-        3: 0.75,
-        4: 1.00,
-    },
-    "conservative": {
-        0: 0.00,
-        1: 0.00,
-        2: 0.50,
-        3: 0.75,
-        4: 1.00,
-    },
-}
-
-BUYHOLD_LABEL = "BTC Buy & Hold"
+@st.cache_data(ttl=3600, show_spinner=False)
+def fresh_data(provider):
+    return download_prices(provider)
 
 
-# =========================
-# 전략 정의
-# =========================
-
-STRATEGIES = {
-    "original": {
-        "label": "원안 전략",
-        "description": "5/20/65일선이 120일선을 상향 돌파할 때 분할매수, 5일선 하향 돌파 시 전량 매도",
-        "strategy_type": "event",
-        "sell_mode": "original",
-        "confirm_days": 1,
-        "buffer_pct": 0.0,
-        "frequency": "daily",
-    },
-    "improved": {
-        "label": "개선 매도 전략",
-        "description": "5/20/65일선이 120일선을 상향 돌파할 때 분할매수, 5일선 하락 50%, 20일선 하락 25%, 65일선 하락 0%",
-        "strategy_type": "event",
-        "sell_mode": "partial",
-        "confirm_days": 1,
-        "buffer_pct": 0.0,
-        "frequency": "daily",
-    },
-    "confirm2": {
-        "label": "개선+2일 확인",
-        "description": "5/20/65 개선 매도 전략에 2일 연속 확인 규칙 추가",
-        "strategy_type": "event",
-        "sell_mode": "partial",
-        "confirm_days": 2,
-        "buffer_pct": 0.0,
-        "frequency": "daily",
-    },
-    "buffer1": {
-        "label": "개선+1% 완충",
-        "description": "5/20/65 개선 매도 전략에 120일선 기준 ±1% 완충 구간 적용",
-        "strategy_type": "event",
-        "sell_mode": "partial",
-        "confirm_days": 1,
-        "buffer_pct": 0.01,
-        "frequency": "daily",
-    },
-    "confirm2_buffer1": {
-        "label": "개선+2일+1% 완충",
-        "description": "5/20/65 개선 매도 전략에 2일 연속 확인과 ±1% 완충 구간을 함께 적용",
-        "strategy_type": "event",
-        "sell_mode": "partial",
-        "confirm_days": 2,
-        "buffer_pct": 0.01,
-        "frequency": "daily",
-    },
-    "weekly": {
-        "label": "개선+주 1회 판단",
-        "description": "5/20/65 개선 매도 전략을 매주 일요일 종가 기준으로만 판단",
-        "strategy_type": "event",
-        "sell_mode": "partial",
-        "confirm_days": 1,
-        "buffer_pct": 0.0,
-        "frequency": "weekly",
-    },
-    "hybrid_score": {
-        "label": "하이브리드 점수 전략",
-        "description": "5일선>120일선, 20일선>120일선, 65일선>120일선, 현재가>65일 전 가격을 각각 1점으로 계산해 점수×25% 투자",
-        "strategy_type": "score",
-        "score_mode": "linear",
-        "confirm_days": 1,
-        "buffer_pct": 0.0,
-        "frequency": "daily",
-    },
-    "hybrid_score_conservative": {
-        "label": "하이브리드 보수형 점수 전략",
-        "description": "4점 모멘텀 점수 중 0~1점은 현금, 2점 50%, 3점 75%, 4점 100% 투자",
-        "strategy_type": "score",
-        "score_mode": "conservative",
-        "confirm_days": 1,
-        "buffer_pct": 0.0,
-        "frequency": "daily",
-    },
-}
+@st.cache_data(show_spinner=False)
+def calculate(prices, fee, delay):
+    return run_all(prices, make_signals(prices), fee=fee, delay=delay)
 
 
-# =========================
-# 데이터 다운로드
-# =========================
-
-@st.cache_data(ttl=60 * 60)
-def download_price_data(
-    ticker: str,
-    start: str,
-    end: Optional[str] = None,
-) -> pd.DataFrame:
-    """
-    yfinance에서 가격 데이터를 다운로드합니다.
-    """
-    import yfinance as yf
-
-    df = yf.download(
-        ticker,
-        start=start,
-        end=end,
-        auto_adjust=True,
-        progress=False,
-    )
-
-    if df.empty:
-        raise ValueError("가격 데이터를 불러오지 못했습니다.")
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    out = df[["Close"]].copy()
-    out.columns = ["close"]
-    out.index = pd.to_datetime(out.index)
-    out = out.dropna()
-
-    return out
-
-
-# =========================
-# 이동평균, 모멘텀 점수 및 신호
-# =========================
-
-def add_moving_averages(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    이동평균선을 계산합니다.
-    """
-    out = df.copy()
-
-    for n in ALL_MAS:
-        out[f"ma{n}"] = out["close"].rolling(n).mean()
-
-    return out
-
-
-def add_momentum_score(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    5/20/65일선과 120일선, 65일 가격 모멘텀을 이용해 0~4점 모멘텀 점수를 계산합니다.
-
-    점수 조건:
-    - 5일선 > 120일선: +1점
-    - 20일선 > 120일선: +1점
-    - 65일선 > 120일선: +1점
-    - 현재가 > 65일 전 가격: +1점
-    """
-    out = df.copy()
-
-    out["score_ma5_120"] = (out[f"ma{FAST_MA}"] > out[f"ma{BASE_MA}"]).astype(int)
-    out["score_ma20_120"] = (out[f"ma{MID_MA}"] > out[f"ma{BASE_MA}"]).astype(int)
-    out["score_ma65_120"] = (out[f"ma{SLOW_MA}"] > out[f"ma{BASE_MA}"]).astype(int)
-    out["score_price_65"] = (out["close"] > out["close"].shift(PRICE_MOMENTUM_DAYS)).astype(int)
-
-    out["momentum_score"] = (
-        out["score_ma5_120"]
-        + out["score_ma20_120"]
-        + out["score_ma65_120"]
-        + out["score_price_65"]
-    )
-
-    return out
-
-
-def calculate_score_position(df: pd.DataFrame, score_mode: str) -> pd.Series:
-    """
-    모멘텀 점수에 따라 투자 비중을 계산합니다.
-    """
-    if score_mode not in SCORE_POSITION_MAPS:
-        raise ValueError(f"알 수 없는 score_mode입니다: {score_mode}")
-
-    score_df = add_momentum_score(df)
-    position = score_df["momentum_score"].map(SCORE_POSITION_MAPS[score_mode])
-
-    return position.fillna(0.0).clip(lower=0.0, upper=1.0)
-
-
-def state_signal(state: pd.Series, confirm_days: int) -> pd.Series:
-    """
-    조건이 confirm_days일 연속 성립한 첫날만 True로 만듭니다.
-    confirm_days=1이면 일반적인 상태 전환 신호와 같습니다.
-    """
-    state = state.fillna(False).astype(bool)
-
-    if confirm_days <= 1:
-        confirmed = state
+def display_metrics(frame):
+    display = frame.copy()
+    if 'strategy' in display.columns:
+        display['strategy'] = display.strategy.map(LABELS).fillna(display.strategy)
+        display = display.rename(columns={'strategy':'전략', 'period':'기간'})
     else:
-        confirmed = state.rolling(confirm_days).sum().eq(confirm_days).fillna(False)
+        display.index = [LABELS.get(k,k) for k in display.index]
+        display.index.name = '전략'
+    fmt = {METRIC_NAMES[k]:'{:.2%}' if k in PCT else '{:,.2f}' for k in display.columns if k in METRIC_NAMES}
+    return display.rename(columns=METRIC_NAMES).style.format(fmt, na_rep='—')
 
-    return confirmed & ~confirmed.shift(1).fillna(False)
 
-
-def add_cross_signals(
-    df: pd.DataFrame,
-    confirm_days: int = 1,
-    buffer_pct: float = 0.0,
-) -> pd.DataFrame:
-    """
-    상향/하향 돌파 신호를 계산합니다.
-
-    buffer_pct=0.01이면:
-    - 상향 돌파 인정 기준: 단기선 > 기준선 * 1.01
-    - 하향 돌파 인정 기준: 단기선 < 기준선 * 0.99
-    - 그 사이 구간은 기존 비중 유지
-    """
-    out = df.copy()
-    upper = out[f"ma{BASE_MA}"] * (1.0 + buffer_pct)
-    lower = out[f"ma{BASE_MA}"] * (1.0 - buffer_pct)
-
-    for n in SIGNAL_MAS:
-        up_state = out[f"ma{n}"] > upper
-        down_state = out[f"ma{n}"] < lower
-
-        out[f"up_state_{n}"] = up_state.fillna(False)
-        out[f"down_state_{n}"] = down_state.fillna(False)
-        out[f"cross_up_{n}"] = state_signal(up_state, confirm_days)
-        out[f"cross_down_{n}"] = state_signal(down_state, confirm_days)
-
-    return out
-
-
-def initial_position_from_state(row: pd.Series, buffer_pct: float = 0.0) -> float:
-    """
-    백테스트 시작일에 이미 조건이 충족되어 있으면 현재 상태에 맞춰 초기 비중을 설정합니다.
-    """
-    if pd.isna(row[f"ma{BASE_MA}"]):
-        return 0.0
-
-    upper = row[f"ma{BASE_MA}"] * (1.0 + buffer_pct)
-    position = 0.0
-
-    for n in SIGNAL_MAS:
-        if row[f"ma{n}"] > upper:
-            position = max(position, BUY_TARGETS[n])
-
-    return position
-
-
-def calculate_event_position(
-    signal_df: pd.DataFrame,
-    sell_mode: str,
-    buffer_pct: float,
-) -> pd.Series:
-    """
-    일봉 또는 주봉 신호 데이터에서 전략 비중을 계산합니다.
-
-    보수형 처리:
-    - 65일선이 120일선을 하향 돌파한 날은 중기 추세 훼손으로 보고 당일 매수 신호를 무시합니다.
-    - 원안 전략에서 5일선 하향 돌파로 전량 매도한 날도 당일 매수 신호를 무시합니다.
-    """
-    positions = []
-    position = 0.0
-    initialized = False
-
-    for _, row in signal_df.iterrows():
-        if pd.isna(row[f"ma{BASE_MA}"]):
-            positions.append(0.0)
-            continue
-
-        if not initialized:
-            position = initial_position_from_state(row, buffer_pct)
-            initialized = True
-
-        major_risk_off = False
-
-        # 매도 신호를 먼저 반영합니다.
-        if sell_mode == "original":
-            if row[f"cross_down_{FAST_MA}"]:
-                position = 0.0
-                major_risk_off = True
-        elif sell_mode == "partial":
-            if row[f"cross_down_{SLOW_MA}"]:
-                position = SELL_LIMITS[SLOW_MA]
-                major_risk_off = True
-            elif row[f"cross_down_{MID_MA}"]:
-                position = min(position, SELL_LIMITS[MID_MA])
-            elif row[f"cross_down_{FAST_MA}"]:
-                position = min(position, SELL_LIMITS[FAST_MA])
-        else:
-            raise ValueError(f"알 수 없는 sell_mode입니다: {sell_mode}")
-
-        # 큰 위험 회피 신호가 나온 날에는 당일 매수 신호를 무시합니다.
-        if not major_risk_off:
-            for n in SIGNAL_MAS:
-                if row[f"cross_up_{n}"]:
-                    position = max(position, BUY_TARGETS[n])
-
-        positions.append(position)
-
-    return pd.Series(positions, index=signal_df.index)
-
-
-def calculate_strategy_position(df: pd.DataFrame, config: dict) -> pd.Series:
-    """
-    전략 설정값에 따라 일별 투자 비중을 계산합니다.
-    """
-    strategy_type = config.get("strategy_type", "event")
-
-    if strategy_type == "score":
-        return calculate_score_position(df, score_mode=config["score_mode"]).reindex(df.index).fillna(0.0)
-
-    frequency = config["frequency"]
-    confirm_days = config["confirm_days"]
-    buffer_pct = config["buffer_pct"]
-    sell_mode = config["sell_mode"]
-
-    if frequency == "daily":
-        signal_df = add_cross_signals(df, confirm_days=confirm_days, buffer_pct=buffer_pct)
-        position = calculate_event_position(signal_df, sell_mode=sell_mode, buffer_pct=buffer_pct)
-        return position.reindex(df.index).fillna(0.0)
-
-    if frequency == "weekly":
-        # 비트코인은 매일 거래되므로 일요일 데이터를 주간 판단일로 사용합니다.
-        # 주식형 티커처럼 일요일 데이터가 없는 경우를 대비해 W-SUN의 마지막 관측값을 사용합니다.
-        weekly = df.resample("W-SUN").last().dropna(subset=["close"])
-        weekly = add_cross_signals(weekly, confirm_days=confirm_days, buffer_pct=buffer_pct)
-        weekly_position = calculate_event_position(weekly, sell_mode=sell_mode, buffer_pct=buffer_pct)
-
-        # 주간 판단일에 결정된 비중을 다음 판단일까지 유지합니다.
-        position = weekly_position.reindex(df.index, method="ffill").fillna(0.0)
-        return position
-
-    raise ValueError(f"알 수 없는 frequency입니다: {frequency}")
-
-
-# =========================
-# 백테스트
-# =========================
-
-def run_strategy_backtest(
-    df: pd.DataFrame,
-    position: pd.Series,
-    fee_rate: float,
-) -> pd.DataFrame:
-    """
-    전략 수익률과 누적 평가금을 계산합니다.
-
-    룩어헤드 방지:
-    오늘 종가 기준으로 신호를 확인했다고 보고,
-    오늘 계산된 비중은 다음 날 수익률부터 반영합니다.
-    """
-    out = df.copy()
-    out["position"] = position.reindex(out.index).fillna(0.0)
-    out["btc_return"] = out["close"].pct_change().fillna(0.0)
-    out["applied_position"] = out["position"].shift(1).fillna(0.0)
-    out["turnover"] = out["position"].diff().abs().fillna(0.0)
-    out["fee"] = out["turnover"] * fee_rate
-    out["strategy_return"] = out["applied_position"] * out["btc_return"] - out["fee"]
-    out["equity"] = (1.0 + out["strategy_return"]).cumprod()
-    return out
-
-
-def run_buy_and_hold_backtest(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    비트코인 단순 보유 전략을 계산합니다.
-    """
-    out = df.copy()
-    out["position"] = 1.0
-    out["btc_return"] = out["close"].pct_change().fillna(0.0)
-    out["strategy_return"] = out["btc_return"]
-    out["equity"] = (1.0 + out["btc_return"]).cumprod()
-    return out
-
-
-# =========================
-# 성과지표
-# =========================
-
-def calculate_recovery_stats(equity: pd.Series) -> dict:
-    """
-    전고점 회복 기간 관련 지표를 계산합니다.
-    """
-    equity = equity.dropna()
-    peak = equity.cummax()
-    underwater = equity < peak
-
-    periods = []
-    start_date = None
-
-    for date, is_underwater in underwater.items():
-        if is_underwater and start_date is None:
-            start_date = date
-        elif not is_underwater and start_date is not None:
-            periods.append((date - start_date).days)
-            start_date = None
-
-    if start_date is not None:
-        periods.append((equity.index[-1] - start_date).days)
-
-    if not periods:
-        return {
-            "최장회복기간_일": 0,
-            "평균회복기간_일": 0.0,
-        }
-
-    return {
-        "최장회복기간_일": max(periods),
-        "평균회복기간_일": float(np.mean(periods)),
-    }
-
-
-def calculate_metrics(
-    equity: pd.Series,
-    returns: pd.Series,
-    position: Optional[pd.Series] = None,
-) -> dict:
-    """
-    CAGR, MDD, 변동성, 샤프, 소르티노, UPI 등을 계산합니다.
-    """
-    equity = equity.dropna()
-    returns = returns.reindex(equity.index).fillna(0.0)
-
-    total_days = (equity.index[-1] - equity.index[0]).days
-    years = total_days / 365.25
-
-    final_value = equity.iloc[-1]
-    cagr = final_value ** (1 / years) - 1 if years > 0 else np.nan
-
-    drawdown = equity / equity.cummax() - 1
-    mdd = drawdown.min()
-    volatility = returns.std() * np.sqrt(365.25)
-
-    sharpe = np.nan
-    if returns.std() != 0:
-        sharpe = returns.mean() / returns.std() * np.sqrt(365.25)
-
-    downside_returns = returns[returns < 0]
-    sortino = np.nan
-    if downside_returns.std() != 0:
-        sortino = returns.mean() / downside_returns.std() * np.sqrt(365.25)
-
-    ulcer_index = np.sqrt(np.mean(np.square(drawdown[drawdown < 0])))
-    upi = np.nan
-    if ulcer_index != 0:
-        upi = cagr / ulcer_index
-
-    avg_position = np.nan
-    trade_count = np.nan
-    turnover_per_year = np.nan
-
-    if position is not None:
-        position = position.reindex(equity.index).fillna(0.0)
-        position_change = position.diff().fillna(0.0)
-        avg_position = position.mean()
-        trade_count = int((position_change.abs() > 0).sum())
-        turnover_per_year = position_change.abs().sum() / years if years > 0 else np.nan
-
-    recovery_stats = calculate_recovery_stats(equity)
-
-    return {
-        "최종배율": final_value,
-        "CAGR": cagr,
-        "MDD": mdd,
-        "연변동성": volatility,
-        "Sharpe": sharpe,
-        "Sortino": sortino,
-        "UPI": upi,
-        "평균투자비중": avg_position,
-        "거래횟수": trade_count,
-        "연평균회전율": turnover_per_year,
-        **recovery_stats,
-    }
-
-
-def format_percent(x: float) -> str:
-    if pd.isna(x):
-        return ""
-    return f"{x:.2%}"
-
-
-def format_number(x: float) -> str:
-    if pd.isna(x):
-        return ""
-    return f"{x:,.2f}"
-
-
-def make_display_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    화면 표시용 성과표를 만듭니다.
-    """
-    display = metrics_df.copy()
-
-    for col in ["CAGR", "MDD", "연변동성", "평균투자비중", "연평균회전율"]:
-        display[col] = display[col].map(format_percent)
-
-    for col in ["최종배율", "Sharpe", "Sortino", "UPI", "거래횟수", "최장회복기간_일", "평균회복기간_일"]:
-        display[col] = display[col].map(format_number)
-
-    return display
-
-
-# =========================
-# 그래프
-# =========================
-
-def make_equity_chart(equity_panel: pd.DataFrame, selected_labels: list[str]) -> go.Figure:
-    """
-    누적 수익률 그래프를 만듭니다.
-    """
+def line_chart(paths, field, title, log=False):
     fig = go.Figure()
-
-    for label in selected_labels:
-        fig.add_trace(
-            go.Scatter(
-                x=equity_panel.index,
-                y=equity_panel[label],
-                mode="lines",
-                name=label,
-            )
-        )
-
-    fig.update_layout(
-        title="누적 수익률 비교, 시작점 1",
-        xaxis_title="날짜",
-        yaxis_title="평가배율, 로그 스케일",
-        yaxis_type="log",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        height=600,
-    )
-
+    for key,path in paths.items():
+        series = drawdown(path) if field == 'drawdown' else path[field]
+        if field in ('equity','drawdown'):
+            series = pd.concat([pd.Series([1. if field=='equity' else 0.],
+                                index=[series.index[0]-pd.Timedelta(days=1)]), series])
+        fig.add_trace(go.Scatter(x=series.index, y=series, name=LABELS[key], mode='lines', line={'width':1.6}))
+    fig.update_layout(title=title, height=470, hovermode='x unified',
+                      yaxis_type='log' if log else 'linear', legend={'orientation':'h','y':-0.22},
+                      margin={'t':55,'b':90}, template='plotly_white')
+    if field in ('drawdown','weight'): fig.update_yaxes(tickformat='.0%')
     return fig
 
 
-def make_drawdown_chart(equity_panel: pd.DataFrame, selected_labels: list[str]) -> go.Figure:
-    """
-    낙폭 그래프를 만듭니다.
-    """
-    fig = go.Figure()
-
-    for label in selected_labels:
-        equity = equity_panel[label]
-        drawdown = equity / equity.cummax() - 1
-        fig.add_trace(
-            go.Scatter(
-                x=equity_panel.index,
-                y=drawdown,
-                mode="lines",
-                name=label,
-            )
-        )
-
-    fig.update_layout(
-        title="MDD / Drawdown 비교",
-        xaxis_title="날짜",
-        yaxis_title="Drawdown",
-        yaxis_tickformat=".0%",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        height=430,
-    )
-
-    return fig
-
-
-def make_position_chart(position_panel: pd.DataFrame, selected_labels: list[str]) -> go.Figure:
-    """
-    투자 비중 그래프를 만듭니다.
-    """
-    fig = go.Figure()
-
-    for label in selected_labels:
-        if label == BUYHOLD_LABEL:
-            continue
-        fig.add_trace(
-            go.Scatter(
-                x=position_panel.index,
-                y=position_panel[label],
-                mode="lines",
-                name=label,
-            )
-        )
-
-    fig.update_layout(
-        title="전략별 투자 비중",
-        xaxis_title="날짜",
-        yaxis_title="투자 비중",
-        yaxis_tickformat=".0%",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        height=380,
-    )
-
-    return fig
-
-
-def make_score_chart(score_df: pd.DataFrame) -> go.Figure:
-    """
-    하이브리드 모멘텀 점수 그래프를 만듭니다.
-    """
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=score_df.index,
-            y=score_df["momentum_score"],
-            mode="lines",
-            name="모멘텀 점수",
-        )
-    )
-
-    fig.update_layout(
-        title="하이브리드 모멘텀 점수, 0~4점",
-        xaxis_title="날짜",
-        yaxis_title="점수",
-        yaxis=dict(range=[-0.1, 4.1], dtick=1),
-        hovermode="x unified",
-        height=320,
-    )
-
-    return fig
-
-
-# =========================
-# 앱 본문
-# =========================
-
-st.title("₿ BTC 추세추종·65일 모멘텀 하이브리드 전략 비교")
-
-st.markdown(
-    """
-    120일선을 기준선으로 두는 **5·20·65 이동평균 추세추종 전략**과,
-    여기에 **65일 가격 모멘텀**을 섞은 하이브리드 점수 전략을 함께 비교합니다.
-
-    하이브리드 점수 전략은 아래 4가지 조건을 각각 1점으로 계산합니다.
-
-    - **5일선 > 120일선**: 단기 반등/추세 점수
-    - **20일선 > 120일선**: 확인 추세 점수
-    - **65일선 > 120일선**: 중기 추세 점수
-    - **현재가 > 65일 전 가격**: 논문식 65일 가격 모멘텀 점수
-    """
-)
-
-with st.expander("전략 규칙 보기", expanded=False):
-    strategy_info = pd.DataFrame(
-        [
-            {
-                "전략": cfg["label"],
-                "설명": cfg["description"],
-                "유형": "점수형" if cfg.get("strategy_type") == "score" else "돌파형",
-                "확인일수": cfg.get("confirm_days", ""),
-                "완충구간": f"{cfg.get('buffer_pct', 0.0):.1%}",
-                "판단주기": "매일" if cfg.get("frequency") == "daily" else "주 1회",
-            }
-            for cfg in STRATEGIES.values()
-        ]
-    )
-    st.dataframe(strategy_info, use_container_width=True)
-
-with st.expander("하이브리드 점수 비중 규칙 보기", expanded=False):
-    score_rule = pd.DataFrame(
-        [
-            {"점수": "0점", "기본형 비중": "0%", "보수형 비중": "0%"},
-            {"점수": "1점", "기본형 비중": "25%", "보수형 비중": "0%"},
-            {"점수": "2점", "기본형 비중": "50%", "보수형 비중": "50%"},
-            {"점수": "3점", "기본형 비중": "75%", "보수형 비중": "75%"},
-            {"점수": "4점", "기본형 비중": "100%", "보수형 비중": "100%"},
-        ]
-    )
-    st.dataframe(score_rule, use_container_width=True)
-
-with st.expander("기존 5·20·65 / 120일선 돌파형 비중 규칙 보기", expanded=False):
-    weight_rule = pd.DataFrame(
-        [
-            {"구분": "매수", "조건": "5일선 > 120일선", "목표/제한 비중": "50%"},
-            {"구분": "매수", "조건": "20일선 > 120일선", "목표/제한 비중": "75%"},
-            {"구분": "매수", "조건": "65일선 > 120일선", "목표/제한 비중": "100%"},
-            {"구분": "매도", "조건": "5일선 < 120일선", "목표/제한 비중": "최대 50%"},
-            {"구분": "매도", "조건": "20일선 < 120일선", "목표/제한 비중": "최대 25%"},
-            {"구분": "매도", "조건": "65일선 < 120일선", "목표/제한 비중": "0%"},
-        ]
-    )
-    st.dataframe(weight_rule, use_container_width=True)
-
+st.title('₿ BTC 추세추종 연구실')
+st.caption('5 / 20 / 65 / 120 · 사전 고정한 후보 · 같은 가격, 비용, 실행 시점으로 비교')
 with st.sidebar:
-    st.header("백테스트 설정")
-
-    ticker = st.text_input("티커", value="BTC-USD")
-    start_date = st.date_input("시작일", value=pd.Timestamp("2014-09-17").date())
-    fee_rate = st.number_input(
-        "거래비용, 비중 100% 변화 기준",
-        min_value=0.0,
-        max_value=0.05,
-        value=0.001,
-        step=0.0005,
-        format="%.4f",
-    )
-    trim_to_signal = st.checkbox("120일선 계산 이후부터 비교", value=True)
-
-    st.divider()
-    st.caption("그래프에 표시할 전략")
-    default_graph_labels = [
-        "개선 매도 전략",
-        "개선+주 1회 판단",
-        "하이브리드 점수 전략",
-        "하이브리드 보수형 점수 전략",
-        BUYHOLD_LABEL,
-    ]
-    selected_labels = st.multiselect(
-        "표시 전략 선택",
-        options=[cfg["label"] for cfg in STRATEGIES.values()] + [BUYHOLD_LABEL],
-        default=default_graph_labels,
-    )
-
-    st.caption("예: 0.001 = 0.1%")
+    st.header('분석 조건')
+    source = st.selectbox('데이터', ['연구 고정 스냅샷', 'Coin Metrics 새로 조회', 'Yahoo Finance 새로 조회'])
+    fee_pct = st.number_input('편도 거래비용 (%)', min_value=0., max_value=2., value=.1, step=.05, format='%.2f')
+    delay = st.selectbox('종가 신호 후 체결 지연', [1,2], format_func=lambda n:f'{n}일 뒤 종가 체결')
+    st.caption('기본: t 종가 신호 → t+1 종가 체결 → t+2 수익부터 새 보유량 반영')
 
 try:
-    raw = download_price_data(ticker=ticker, start=str(start_date))
-    df = add_moving_averages(raw)
-
-    if trim_to_signal:
-        df = df.dropna(subset=[f"ma{BASE_MA}"]).copy()
-
-    if df.empty:
-        st.error("120일 이동평균 계산 이후 사용할 수 있는 데이터가 없습니다.")
-        st.stop()
-
-    score_df = add_momentum_score(df)
-
-    backtests = {}
-    metrics = {}
-    position_panel = pd.DataFrame(index=df.index)
-    equity_panel = pd.DataFrame(index=df.index)
-    return_panel = pd.DataFrame(index=df.index)
-
-    for _, config in STRATEGIES.items():
-        label = config["label"]
-        position = calculate_strategy_position(df, config)
-        bt = run_strategy_backtest(df, position, fee_rate)
-
-        backtests[label] = bt
-        position_panel[label] = bt["position"]
-        equity_panel[label] = bt["equity"]
-        return_panel[label] = bt["strategy_return"]
-        metrics[label] = calculate_metrics(bt["equity"], bt["strategy_return"], bt["position"])
-
-    buyhold_bt = run_buy_and_hold_backtest(df)
-    backtests[BUYHOLD_LABEL] = buyhold_bt
-    position_panel[BUYHOLD_LABEL] = 1.0
-    equity_panel[BUYHOLD_LABEL] = buyhold_bt["equity"]
-    return_panel[BUYHOLD_LABEL] = buyhold_bt["strategy_return"]
-    metrics[BUYHOLD_LABEL] = calculate_metrics(
-        buyhold_bt["equity"],
-        buyhold_bt["strategy_return"],
-        buyhold_bt["position"],
-    )
-
-    metrics_df = pd.DataFrame(metrics).T
-    display_metrics = make_display_metrics(metrics_df)
-
-    latest = df.iloc[-1]
-    latest_score = score_df.iloc[-1]
-    latest_positions = position_panel.iloc[-1]
-
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("기준일", str(df.index[-1].date()))
-    col2.metric("BTC 종가", f"{latest['close']:,.2f}")
-    col3.metric(
-        "5/20/65/120일선",
-        f"{latest['ma5']:,.0f} / {latest['ma20']:,.0f} / {latest['ma65']:,.0f} / {latest['ma120']:,.0f}",
-    )
-    col4.metric("현재 모멘텀 점수", f"{int(latest_score['momentum_score'])} / 4점")
-    col5.metric("거래비용", f"{fee_rate:.2%}")
-
-    st.subheader("현재 모멘텀 점수 세부 조건")
-    current_score_detail = pd.DataFrame(
-        [
-            {"조건": "5일선 > 120일선", "충족 여부": "예" if latest_score["score_ma5_120"] == 1 else "아니오", "점수": int(latest_score["score_ma5_120"])},
-            {"조건": "20일선 > 120일선", "충족 여부": "예" if latest_score["score_ma20_120"] == 1 else "아니오", "점수": int(latest_score["score_ma20_120"])},
-            {"조건": "65일선 > 120일선", "충족 여부": "예" if latest_score["score_ma65_120"] == 1 else "아니오", "점수": int(latest_score["score_ma65_120"])},
-            {"조건": "현재가 > 65일 전 가격", "충족 여부": "예" if latest_score["score_price_65"] == 1 else "아니오", "점수": int(latest_score["score_price_65"])},
-        ]
-    )
-    st.dataframe(current_score_detail, use_container_width=True)
-
-    st.subheader("현재 전략별 투자 비중")
-    current_position_df = pd.DataFrame(
-        {
-            "현재 비중": latest_positions,
-        }
-    )
-    current_position_df["현재 비중"] = current_position_df["현재 비중"].map(format_percent)
-    st.dataframe(current_position_df, use_container_width=True)
-
-    st.subheader("성과 요약표")
-    st.dataframe(display_metrics, use_container_width=True)
-
-    st.subheader("누적 수익률 그래프")
-    st.plotly_chart(make_equity_chart(equity_panel, selected_labels), use_container_width=True)
-
-    st.subheader("낙폭 그래프")
-    st.plotly_chart(make_drawdown_chart(equity_panel, selected_labels), use_container_width=True)
-
-    st.subheader("투자 비중 변화")
-    st.plotly_chart(make_position_chart(position_panel, selected_labels), use_container_width=True)
-
-    st.subheader("하이브리드 모멘텀 점수 변화")
-    st.plotly_chart(make_score_chart(score_df), use_container_width=True)
-
-    st.subheader("최근 일별 데이터")
-    daily_panel = pd.concat(
-        [
-            df[["close", "ma5", "ma20", "ma65", "ma120"]],
-            score_df[["score_ma5_120", "score_ma20_120", "score_ma65_120", "score_price_65", "momentum_score"]],
-            position_panel.add_suffix("_position"),
-            equity_panel.add_suffix("_equity"),
-            return_panel.add_suffix("_return"),
-        ],
-        axis=1,
-    )
-    st.dataframe(daily_panel.tail(500), use_container_width=True)
-
-    csv_metrics = metrics_df.to_csv(encoding="utf-8-sig")
-    csv_daily = daily_panel.to_csv(encoding="utf-8-sig")
-
-    dl1, dl2 = st.columns(2)
-    dl1.download_button(
-        "성과표 CSV 다운로드",
-        data=csv_metrics,
-        file_name="btc_strategy_compare_metrics.csv",
-        mime="text/csv",
-    )
-    dl2.download_button(
-        "일별 백테스트 데이터 CSV 다운로드",
-        data=csv_daily,
-        file_name="btc_strategy_compare_daily.csv",
-        mime="text/csv",
-    )
-
+    if source == '연구 고정 스냅샷':
+        prices = snapshot()
+        metadata = json.loads(DATA_PATH.with_suffix('.json').read_text(encoding='utf-8'))
+        provider_name = metadata['provider']
+    else:
+        provider = 'coinmetrics' if source.startswith('Coin') else 'yahoo'
+        prices = fresh_data(provider)
+        provider_name = prices.attrs.get('provider', source)
+    with st.spinner('동일한 실행 조건으로 계산 중…'):
+        all_paths = calculate(prices, fee_pct/100, delay)
 except Exception as exc:
-    st.error(f"실행 중 오류가 발생했습니다: {exc}")
+    st.error(f'데이터를 계산하지 못했습니다: {exc}')
+    st.info('네트워크 제한이 있는 경우 데이터에서 연구 고정 스냅샷을 선택하세요.')
+    st.stop()
+
+first = next(iter(all_paths.values())).index[0]
+last = prices.index[-1]
+st.caption(f'출처: {provider_name} · 가격 {prices.index[0]:%Y-%m-%d}~{last:%Y-%m-%d} · 성과 공통 시작 {first:%Y-%m-%d} · UTC 일말')
+age = (pd.Timestamp.now(tz='UTC').tz_localize(None).normalize()-last).days
+if age > 3:
+    st.warning(f'자료 마지막 날짜는 {last:%Y-%m-%d}입니다({age}일 전). 아래 최신 비중은 이 자료 기준이며 실시간 비중이 아닙니다.')
+with st.sidebar:
+    period = st.selectbox('평가 기간', list(PERIODS)+['직접 선택'])
+    if period == '직접 선택':
+        start_date = st.date_input('시작일', first.date(), min_value=first.date(), max_value=last.date())
+        end_date = st.date_input('종료일', last.date(), min_value=first.date(), max_value=last.date())
+        start, end = str(start_date), str(end_date)
+    else:
+        start, end = PERIODS[period]
+    mode = st.radio('하위기간 계산', ['전체 경로 승계', '시작일 신규 투자'])
+    selected = st.multiselect('표·그래프 전략', list(LABELS), default=list(LABELS), format_func=LABELS.get)
+if not selected:
+    st.info('한 개 이상의 전략을 선택하세요.')
+    st.stop()
+if pd.Timestamp(start) > pd.Timestamp(end or last):
+    st.error('시작일은 종료일보다 빨라야 합니다.')
+    st.stop()
+if mode == '시작일 신규 투자':
+    paths = run_all(prices, fee=fee_pct/100, delay=delay, start=start, end=end)
+else:
+    paths = {k:slice_path(v,start,end) for k,v in all_paths.items()}
+paths = {k:paths[k] for k in selected if not paths[k].empty}
+if not paths:
+    st.info('선택 기간에 성과 데이터가 없습니다.')
+    st.stop()
+table = metric_table(paths)
+sample = next(iter(paths.values()))
+st.write(f'**선택 성과 구간: {sample.index[0]:%Y-%m-%d} ~ {sample.index[-1]:%Y-%m-%d}** · 편도 {fee_pct:.2f}% · {mode}')
+st.caption('현금 이자·무위험수익률 0%, USD 기준, 공매도·레버리지 없음. 거래 사이 실제 투자비중은 가격에 따라 변합니다.')
+tabs = st.tabs(['성과와 그래프','기간별 비교','비용·안정성','자료 기준 비중','연구 근거'])
+with tabs[0]:
+    st.subheader('성과표')
+    st.dataframe(display_metrics(table), width='stretch')
+    st.caption('평균 비중은 각 일간 수익에 적용된 실제 비중. 거래수는 편도 주문수이며, turnover는 실제 거래대금/NAV의 연간 합입니다.')
+    st.caption('완료 회복기간은 이전 고점~회복일. 미회복 경과와 최장 수중기간을 별도로 봐야 하며, —는 회복 완료 사례 없음입니다.')
+    st.plotly_chart(line_chart(paths,'equity','누적 평가배율 · 로그 눈금',True), width='stretch')
+    st.plotly_chart(line_chart(paths,'drawdown','Drawdown · 직전 고점 대비'), width='stretch')
+    st.plotly_chart(line_chart(paths,'weight','실제 BTC 투자비중'), width='stretch')
+    st.subheader('연도별 수익률')
+    annual = annual_returns(paths).rename(columns=LABELS)
+    st.dataframe(annual.style.format('{:.2%}',na_rep='—'), width='stretch')
+    st.caption('첫해와 마지막 해는 선택한 날짜까지만 포함한 부분 연도일 수 있습니다.')
+    st.subheader('거래 부담')
+    st.dataframe(display_metrics(table[['orders','turnover_pa','reversal_14d_count','reversal_14d_rate']]), width='stretch')
+    st.caption('14일 내 매수↔매도 반전은 휩쏘 대리 지표입니다. 손실 왕복 거래 수가 아니며 변동성 리밸런싱도 포함합니다. 최초 진입은 반전 집계에서 제외됩니다.')
+    st.download_button('선택 성과표 CSV', table.rename(index=LABELS).to_csv().encode('utf-8-sig'), 'btc_metrics.csv','text/csv')
+    st.download_button('선택 일별 결과 CSV', pd.concat(paths,names=['strategy','date']).to_csv().encode('utf-8-sig'), 'btc_daily.csv','text/csv')
+    st.download_button('연도별 수익률 CSV', annual.to_csv().encode('utf-8-sig'), 'btc_annual.csv','text/csv')
+with tabs[1]:
+    st.subheader('고정 시장국면 비교')
+    st.caption('이 표는 상단 기간 선택과 무관하게 모든 고정 구간을 비교하며 전체 경로를 승계합니다. 비용·체결 지연·선택 전략은 동일합니다.')
+    pt = period_table({k:all_paths[k] for k in selected})
+    period_metric = st.selectbox('비교 지표', ['CAGR','MDD','Sharpe','Sortino','UPI','Calmar','turnover_pa','underwater_max_days'], format_func=lambda k:METRIC_NAMES[k])
+    pivot = pt.pivot(index='period',columns='strategy',values=period_metric).rename(columns=LABELS)
+    st.dataframe(pivot.style.format('{:.2%}' if period_metric in PCT else '{:,.2f}'), width='stretch')
+    with st.expander('기간별 전체 지표'): st.dataframe(display_metrics(pt), width='stretch')
+    st.download_button('기간별 지표 CSV', pt.to_csv(index=False).encode('utf-8-sig'),'btc_periods.csv','text/csv')
+with tabs[2]:
+    st.subheader('같은 구간의 거래비용 민감도')
+    cost_frames = []
+    for fee in [0.,.001,.002]:
+        runs = calculate(prices,fee,delay)
+        if mode == '시작일 신규 투자': runs = run_all(prices,fee=fee,delay=delay,start=start,end=end)
+        else: runs = {k:slice_path(v,start,end) for k,v in runs.items()}
+        mt = metric_table({k:runs[k] for k in selected if not runs[k].empty}).reset_index()
+        mt.insert(1,'편도 비용',f'{fee:.1%}')
+        cost_frames.append(mt)
+    ct = pd.concat(cost_frames,ignore_index=True)
+    st.dataframe(display_metrics(ct[['strategy','편도 비용','CAGR','Sharpe','MDD','turnover_pa']]), width='stretch')
+    st.subheader('사전 고정한 파라미터 주변값 검증')
+    st.caption('아래는 보고서의 고정 스냅샷·편도 0.1% 연구 결과입니다. 상단 설정에 따라 바뀌지 않습니다. 가장 좋은 값을 고르는 도구가 아닙니다.')
+    robust_path = ROOT/'research/results/robustness.csv'
+    if robust_path.exists():
+        robust = pd.read_csv(robust_path,index_col=0)
+        family = st.selectbox('검증 항목', robust.family.unique().tolist())
+        robust_period = st.selectbox('검증 구간',robust.period.unique().tolist())
+        view = robust[(robust.family==family)&(robust.period==robust_period)&robust.strategy.isin(selected)]
+        st.dataframe(display_metrics(view[['strategy','value','effective_start','CAGR','MDD','Sharpe','UPI','turnover_pa','underwater_max_days']]),width='stretch')
+    st.info('시간순 검증은 2019년 이후 고정 규칙을 연별로 평가한 사후적 holdout입니다. 2026년에 이미 알려진 역사를 사용했으므로 진정한 미관측 OOS라고 주장하지 않습니다.')
+with tabs[3]:
+    st.subheader(f'자료 마지막 날 비중 · {last:%Y-%m-%d} UTC')
+    st.caption('기간 선택과 무관한 마지막 데이터 기준입니다. 실제 계좌 주문이나 실시간 추천이 아닙니다.')
+    current = pd.DataFrame({k:{'마지막 신호 목표':v.signal_target.iloc[-1], '마지막 체결 지시 목표':v.executed_target.iloc[-1],
+                               '실제 모의 보유비중':v.weight.iloc[-1]} for k,v in all_paths.items() if k in selected}).T.rename(index=LABELS)
+    st.dataframe(current.style.format('{:.1%}'), width='stretch')
+    st.caption('신호 목표는 마지막 확정 종가로 계산된 목표, 체결 지시 목표는 지연 적용된 목표입니다. 실제 비중은 거래 이후 가격 움직임에 따라 달라집니다.')
+with tabs[4]:
+    st.subheader('보존한 기존 전략과 사전 고정한 연구 후보')
+    for config in STRATEGIES.values(): st.markdown(f'**{config["label"]}** — {config["description"]}')
+    st.markdown('**연구: 주간 가격·120일선** — 일요일 종가가 SMA120 위면 100%, 아래면 현금.\n\n'
+                '**연구: 월말 10개월선** — 완결 월말 종가가 10개 월말 종가 평균 위면 100%, 아래면 현금.\n\n'
+                '**연구: 주간 가격·변동성40%** — 주간 가격 신호가 상승이면 min(100%, 40% / 최근 60일 연변동성), 아니면 현금.')
+    st.warning('연구 후보를 대시보드에 포함했다고 채택을 권하는 것은 아닙니다. 10개월선은 주변 기간에 민감하고, 변동성 조절은 최근 구간 부진과 많은 리밸런싱을 동반했습니다.')
+    for filename,title in [('REPORT.md','최종 연구 보고서'),('LITERATURE.md','문헌 표'),('PREREGISTRATION.md','성과 계산 전 사전등록'),('AMENDMENTS.md','자료·구현 변경 이력')]:
+        file = ROOT/'research'/filename
+        if file.exists():
+            content = file.read_text(encoding='utf-8')
+            with st.expander(title): st.markdown(content)
+            st.download_button(f'{title} 다운로드',content.encode('utf-8'),filename,'text/markdown',key=filename)

@@ -1,0 +1,13 @@
+﻿,signal_target,executed_target,actual_weight,as_of
+original,1.0,1.0,1.0000000000000002,2026-05-23
+improved,1.0,1.0,1.0,2026-05-23
+confirm2,1.0,1.0,1.0,2026-05-23
+buffer1,1.0,1.0,1.0,2026-05-23
+confirm2_buffer1,1.0,1.0,1.0,2026-05-23
+weekly,1.0,1.0,1.0,2026-05-23
+hybrid_score,1.0,1.0,1.0000000000000002,2026-05-23
+hybrid_score_conservative,1.0,1.0,1.0,2026-05-23
+buy_hold,1.0,1.0,1.0,2026-05-23
+weekly_price,1.0,1.0,1.0,2026-05-23
+monthly_10m,0.0,0.0,0.0,2026-05-23
+weekly_price_vol,1.0,1.0,1.0,2026-05-23
