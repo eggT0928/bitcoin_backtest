@@ -1,7 +1,8 @@
-streamlit
+streamlit>=1.49,<2
 yfinance
 pandas
 numpy
 plotly
 matplotlib
 openpyxl
+requests>=2.31,<3
