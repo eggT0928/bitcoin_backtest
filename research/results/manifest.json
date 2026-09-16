@@ -1,0 +1,20 @@
+{
+  "run_at_utc": "2026-09-16T02:41:32.904845+00:00",
+  "python": "3.12.10",
+  "pandas": "3.0.2",
+  "numpy": "2.4.4",
+  "prereg_commit": "cea80794a06460e581af2316ef85fa43c35e7613",
+  "code_commit": "e369ddeb2da92c8b1fb5febaad5c72815229731f",
+  "data_sha256": "1327d690a90275755d6e3b1420ee3d876d7f9e85110ea0c5f557f14e57b9620c",
+  "prereg_sha256": "04bcbbc2e6630ed73fd9be33001d432110dd198acae67619e732de43abc46487",
+  "sources_sha256": {
+    "backtest_engine.py": "723f4e1c85edaf6c597064acd2edb1cb3e4423a94e73b8e594eef5e6d8d83bdc",
+    "legacy_signals.py": "b5af6d96fe8b78869e1847745242ddcb4fe0db3a0470e35713fb33cf790102ad",
+    "run_research.py": "05161cfcfc5f8dbb632d1c927c1d9c1bea4718d658db78406092753e0e6a4051"
+  },
+  "start": "2015-08-02",
+  "end": "2026-05-23",
+  "fee": 0.001,
+  "delay": 1,
+  "candidate_changes_after_results": false
+}

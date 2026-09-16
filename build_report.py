@@ -24,7 +24,7 @@ NAMES = {'volatility':'연변동성','Ulcer':'Ulcer Index','mean_weight':'평균
 PCT = {'CAGR','MDD','volatility','Ulcer','mean_weight','mean_cash','reversal_14d_rate'}
 
 
-def table(data, cols=None, index=True, pct_extra=()):
+def table(data, cols=None, index=True, pct_extra=(), index_name="전략"):
     d = data[cols].copy() if cols else data.copy()
     if 'strategy' in d.columns: d['strategy']=d.strategy.map(LABELS).fillna(d.strategy)
     if index: d.index=[LABELS.get(k,k) for k in d.index]
@@ -32,7 +32,7 @@ def table(data, cols=None, index=True, pct_extra=()):
         if col in PCT or col in pct_extra: d[col]=d[col].map(lambda v:'—' if pd.isna(v) else f'{v:.2%}')
         elif pd.api.types.is_numeric_dtype(d[col]): d[col]=d[col].map(lambda v:'—' if pd.isna(v) else f'{v:,.2f}')
     d=d.rename(columns=NAMES)
-    if index: d.index.name='전략'
+    if index: d.index.name=index_name
     return d.to_markdown(index=index)
 
 
@@ -176,7 +176,7 @@ parts += ['''
 ### 연도별 수익률 — 연율화하지 않은 실제 해당 연도 수익
 
 2015와 2026은 각각 8월2일부터 / 5월23일까지의 부분 연도다.
-''',table(annual.rename(columns=LABELS),pct_extra=list(LABELS.values())),
+''',table(annual.rename(columns=LABELS),pct_extra=list(LABELS.values()),index_name="연도"),
 '''
 2019 이후 expanding-past / next-year 표는 [chronological_folds.csv](results/chronological_folds.csv)에 모든 전략을 담았다.
 각 fold의 과거 창으로 새 파라미터를 고르지 않았다. 2022 월말은 +2.50%였지만 2025에는 −7.47%로 단순 보유 −6.29%보다 낮았다.
