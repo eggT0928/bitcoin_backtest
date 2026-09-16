@@ -5,3 +5,5 @@ firebase/functions/node_modules/
 .wrangler/
 cloudflare/.wrangler/
 *.local
+__pycache__/
+.pytest_cache/
