@@ -1,7 +1,6 @@
 const SIGNAL_MAS = [5, 20, 65];
 const ALL_MAS = [5, 20, 65, 120];
-const BUY_TARGETS = { 5: 0.5, 20: 0.75, 65: 1.0 };
-const SELL_LIMITS = { 5: 0.5, 20: 0.25, 65: 0.0 };
+const STRATEGY_VERSION = "price-ma120-v1";
 
 function sma(values, period) {
   if (values.length < period) return null;
@@ -27,35 +26,20 @@ function calcSnapshot(rows, includeCurrent = true, now = Date.now()) {
   };
 }
 
-function initialPosition(relations) {
-  return SIGNAL_MAS.reduce(
-    (position, period) => relations[period] ? Math.max(position, BUY_TARGETS[period]) : position,
-    0,
-  );
+function isPriceAboveMa120(snapshot) {
+  return snapshot.price > snapshot.mas[120];
 }
 
-// app.py calculate_event_position(..., sell_mode="partial")와 같은 우선순위다.
-function applyPositionEvents(currentPosition, crossings) {
-  let position = Number.isFinite(currentPosition) ? currentPosition : 0;
-  const down = new Set(crossings.filter((crossing) => !crossing.direction).map((crossing) => crossing.period));
-  const up = new Set(crossings.filter((crossing) => crossing.direction).map((crossing) => crossing.period));
-  let majorRiskOff = false;
+function targetPosition(priceAboveMa120) {
+  return priceAboveMa120 ? 1 : 0;
+}
 
-  if (down.has(65)) {
-    position = SELL_LIMITS[65];
-    majorRiskOff = true;
-  } else if (down.has(20)) {
-    position = Math.min(position, SELL_LIMITS[20]);
-  } else if (down.has(5)) {
-    position = Math.min(position, SELL_LIMITS[5]);
-  }
+function distancePercent(price, reference) {
+  return ((price / reference) - 1) * 100;
+}
 
-  if (!majorRiskOff) {
-    for (const period of SIGNAL_MAS) {
-      if (up.has(period)) position = Math.max(position, BUY_TARGETS[period]);
-    }
-  }
-  return position;
+function fmtPercent(value) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 
 function fmt(value) {
@@ -66,42 +50,34 @@ function eventId(...parts) {
   return parts.join("-").replace(/[^a-zA-Z0-9_.:-]/g, "_");
 }
 
-function startupEvent(live) {
+function strategyStartedEvent(live) {
+  const above = isPriceAboveMa120(live);
+  const distance = distancePercent(live.price, live.mas[120]);
   return {
-    id: "monitor-started-v1",
-    type: "startup",
+    id: "strategy-price-ma120-v1",
+    type: "strategy-start",
     text:
-      "✅ BTC 추세 모니터링 시작\n" +
+      "✅ BTC 현재가/MA120 전략 적용\n" +
       "BTCUSDT / 1분 감시\n" +
-      "MA5·20·65 vs MA120\n" +
-      `Cloudflare 연결 정상 · 현재가 ${fmt(live.price)}`,
+      `현재가 ${fmt(live.price)} / MA120 ${fmt(live.mas[120])} (${fmtPercent(distance)})\n` +
+      `현재 판단: ${above ? "매수·보유 (100%)" : "매도·미보유 (0%)"}\n` +
+      "MA5·20·65는 추세 참고용으로 유지합니다.",
   };
 }
 
-function immediateEvent(period, direction, candidate, live) {
+function priceCrossEvent(direction, live, minuteKey) {
+  const upward = direction === "up";
+  const distance = distancePercent(live.price, live.mas[120]);
   return {
-    id: eventId("immediate", period, direction ? "up" : "down", candidate.startedMinute),
-    type: "intraday-immediate",
+    id: eventId("price-ma120", direction, minuteKey),
+    type: "price-ma120-cross",
     text:
-      "⚡ BTC 장중 교차 포착 (미확정)\n" +
-      `BTCUSDT ${fmt(live.price)}\n` +
-      `MA${period} ${fmt(live.mas[period])} ${direction ? ">" : "<"} MA120 ${fmt(live.mas[120])}\n` +
-      `${direction ? "상향돌파" : "하향돌파"} 감지 · 1분차\n` +
-      "3분 유지 여부를 계속 확인합니다.",
-  };
-}
-
-function confirmedEvent(crossing, before, after, live) {
-  return {
-    id: eventId("confirmed", crossing.period, crossing.direction ? "up" : "down", crossing.startedMinute),
-    type: "intraday-confirmed",
-    text:
-      "✅ BTC 교차 3분 유지 확인\n" +
-      `MA${crossing.period} ${crossing.direction ? "↑" : "↓"} MA120\n` +
-      `BTCUSDT ${fmt(live.price)}\n` +
-      `MA${crossing.period} ${fmt(live.mas[crossing.period])} / MA120 ${fmt(live.mas[120])}\n` +
-      `전략 참고 비중: ${Math.round(before * 100)}% → ${Math.round(after * 100)}%\n` +
-      "※ 장중 신호이며 일봉 종가 확정 전입니다.",
+      `${upward ? "🚀" : "🔻"} BTC 현재가 MA120 ${upward ? "상승돌파" : "하락돌파"}\n` +
+      `현재가 ${fmt(live.price)} / MA120 ${fmt(live.mas[120])}\n` +
+      `MA120 대비 ${fmtPercent(distance)}\n` +
+      `매매 판단: ${upward ? "매수·보유 (100%)" : "매도·미보유 (0%)"}\n` +
+      `추세 참고: MA5 ${fmt(live.mas[5])} · MA20 ${fmt(live.mas[20])} · MA65 ${fmt(live.mas[65])}\n` +
+      "※ 1분 감시 중 포착된 장중 신호이며 일봉 종가 전에는 다시 바뀔 수 있습니다.",
   };
 }
 
@@ -114,12 +90,12 @@ function kstDateFromClose(closeTime) {
   }).format(new Date(closeTime + 1));
 }
 
-function dailyEvent(closed, previousRelations, position) {
-  const changes = SIGNAL_MAS.flatMap((period) =>
-    Boolean(previousRelations[period]) === Boolean(closed.rel[period])
-      ? []
-      : [`MA${period} ${closed.rel[period] ? "↑" : "↓"} MA120`],
-  );
+function dailyEvent(closed, previousAbove, position) {
+  const above = isPriceAboveMa120(closed);
+  const distance = distancePercent(closed.price, closed.mas[120]);
+  const change = previousAbove === above
+    ? "없음"
+    : above ? "종가 기준 MA120 상승돌파" : "종가 기준 MA120 하락돌파";
   const order = ALL_MAS
     .map((period) => [`MA${period}`, closed.mas[period]])
     .sort((left, right) => right[1] - left[1])
@@ -131,10 +107,12 @@ function dailyEvent(closed, previousRelations, position) {
     type: "daily-close",
     text:
       `🕘 BTC 일봉 종가 확정 (${date})\n` +
-      `종가 ${fmt(closed.price)}\n` +
-      `MA5 ${fmt(closed.mas[5])}\nMA20 ${fmt(closed.mas[20])}\nMA65 ${fmt(closed.mas[65])}\nMA120 ${fmt(closed.mas[120])}\n` +
-      `배열: ${order}\n` +
-      `확정 변화: ${changes.length ? changes.join(", ") : "없음"}\n` +
+      `종가 ${fmt(closed.price)} / MA120 ${fmt(closed.mas[120])}\n` +
+      `MA120 대비 ${fmtPercent(distance)}\n` +
+      `종가 판단: ${above ? "MA120 위·매수 우위" : "MA120 아래·매도 우위"}\n` +
+      `종가 변화: ${change}\n` +
+      `추세 참고: MA5 ${fmt(closed.mas[5])} · MA20 ${fmt(closed.mas[20])} · MA65 ${fmt(closed.mas[65])}\n` +
+      `이평선 배열: ${order}\n` +
       `현재 전략 비중: ${Math.round(position * 100)}%`,
   };
 }
@@ -146,89 +124,63 @@ function liveFields(live) {
     ma20: live.mas[20],
     ma65: live.mas[65],
     ma120: live.mas[120],
+    priceAboveMa120: isPriceAboveMa120(live),
     candleCloseTime: live.candleCloseTime,
     dataSource: live.dataSource || "binance-global",
   };
 }
 
+function removeLegacyStrategyState(prior) {
+  const { stableRelations, candidates, dailyRelations, ...current } = prior;
+  return current;
+}
+
 function processMinute(previousState, { live, closed, minuteKey }) {
   const prior = previousState || {};
-  if (prior.lastProcessedMinute === minuteKey) {
-    return { state: prior, events: [], duplicate: true };
-  }
+  const liveAbove = isPriceAboveMa120(live);
+  const closedAbove = isPriceAboveMa120(closed);
 
-  const hasBaseline = prior.initialized === true || prior.stableRelations != null;
-  if (!hasBaseline) {
+  if (prior.strategyVersion !== STRATEGY_VERSION) {
     return {
       duplicate: false,
-      events: [startupEvent(live)],
+      events: [strategyStartedEvent(live)],
       state: {
-        ...prior,
+        ...removeLegacyStrategyState(prior),
         initialized: true,
+        strategyVersion: STRATEGY_VERSION,
         lastProcessedMinute: minuteKey,
-        stableRelations: { ...live.rel },
-        candidates: {},
-        position: initialPosition(live.rel),
+        priceAboveMa120: liveAbove,
+        position: targetPosition(liveAbove),
         live: liveFields(live),
-        dailyRelations: { ...closed.rel },
-        lastClosedCandleCloseTime: closed.candleCloseTime,
+        dailyPriceAboveMa120: closedAbove,
+        lastClosedCandleCloseTime: prior.lastClosedCandleCloseTime ?? closed.candleCloseTime,
       },
     };
   }
 
-  const stable = { ...prior.stableRelations };
-  const candidates = { ...(prior.candidates || {}) };
+  if (prior.lastProcessedMinute === minuteKey) {
+    return { state: prior, events: [], duplicate: true };
+  }
+
   const events = [];
-  const confirmedCrossings = [];
-
-  for (const period of SIGNAL_MAS) {
-    const observed = Boolean(live.rel[period]);
-    const stableValue = Boolean(stable[period]);
-    if (observed === stableValue) {
-      delete candidates[period];
-      continue;
-    }
-
-    const oldCandidate = candidates[period];
-    const candidate = oldCandidate && Boolean(oldCandidate.direction) === observed
-      ? { ...oldCandidate, streak: Number(oldCandidate.streak || 0) + 1, lastMinute: minuteKey }
-      : { direction: observed, streak: 1, startedMinute: minuteKey, lastMinute: minuteKey, immediateEmitted: false };
-
-    if (!candidate.immediateEmitted) {
-      events.push(immediateEvent(period, observed, candidate, live));
-      candidate.immediateEmitted = true;
-    }
-
-    if (candidate.streak >= 3) {
-      stable[period] = observed;
-      confirmedCrossings.push({ period, direction: observed, startedMinute: candidate.startedMinute });
-      delete candidates[period];
-    } else {
-      candidates[period] = candidate;
-    }
+  if (Boolean(prior.priceAboveMa120) !== liveAbove) {
+    events.push(priceCrossEvent(liveAbove ? "up" : "down", live, minuteKey));
   }
 
-  const beforePosition = Number.isFinite(prior.position)
-    ? prior.position
-    : initialPosition(prior.stableRelations);
-  const afterPosition = applyPositionEvents(beforePosition, confirmedCrossings);
-  for (const crossing of confirmedCrossings) {
-    events.push(confirmedEvent(crossing, beforePosition, afterPosition, live));
-  }
-
+  const position = targetPosition(liveAbove);
   const state = {
     ...prior,
     initialized: true,
+    strategyVersion: STRATEGY_VERSION,
     lastProcessedMinute: minuteKey,
-    stableRelations: stable,
-    candidates,
-    position: afterPosition,
+    priceAboveMa120: liveAbove,
+    position,
     live: liveFields(live),
   };
 
   if (closed.candleCloseTime !== prior.lastClosedCandleCloseTime) {
-    events.push(dailyEvent(closed, prior.dailyRelations || closed.rel, afterPosition));
-    state.dailyRelations = { ...closed.rel };
+    events.push(dailyEvent(closed, Boolean(prior.dailyPriceAboveMa120), position));
+    state.dailyPriceAboveMa120 = closedAbove;
     state.lastClosedCandleCloseTime = closed.candleCloseTime;
   }
 
@@ -248,14 +200,14 @@ async function deliverClaimedEvent(event, { send, markSent, markRetry }) {
 
 export {
   ALL_MAS,
-  BUY_TARGETS,
-  SELL_LIMITS,
   SIGNAL_MAS,
-  applyPositionEvents,
+  STRATEGY_VERSION,
   calcSnapshot,
   deliverClaimedEvent,
-  initialPosition,
+  distancePercent,
+  isPriceAboveMa120,
   processMinute,
   relationMap,
   sma,
+  targetPosition,
 };
