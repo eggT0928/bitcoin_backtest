@@ -31,7 +31,7 @@ streamlit run app.py
 
 ## Telegram 실시간 알림
 
-Binance BTCUSDT 일봉의 MA5·20·65와 MA120 교차를 1분마다 확인하는 Telegram 알림 서비스가 Cloudflare Workers + D1에 배포되어 있습니다. 자동 주문은 하지 않습니다.
+Binance BTCUSDT 현재가가 MA120을 상승·하락 돌파하는지 1분마다 확인하는 Telegram 알림 서비스가 Cloudflare Workers + D1에 배포되어 있습니다. MA5·20·65는 추세 참고용이며 자동 주문은 하지 않습니다.
 
 배포 구조와 운영 방법은 [`cloudflare/README.md`](cloudflare/README.md)를 확인하세요.
 

@@ -1,114 +1,131 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  applyPositionEvents,
+  STRATEGY_VERSION,
   calcSnapshot,
   deliverClaimedEvent,
+  distancePercent,
   processMinute,
 } from "../src/signal-engine.js";
 
-const MINUTES = ["2026-08-25T00:00", "2026-08-25T00:01", "2026-08-25T00:02", "2026-08-25T00:03"];
+const MINUTES = ["2026-11-22T00:00", "2026-11-22T00:01", "2026-11-22T00:02"];
 
-function snapshot(rel = { 5: false, 20: false, 65: false }, closeTime = 1_000) {
+function snapshot({ price = 99, ma120 = 100, ma5 = 98, ma20 = 97, ma65 = 96, closeTime = 1_000 } = {}) {
+  const mas = { 5: ma5, 20: ma20, 65: ma65, 120: ma120 };
   return {
-    price: 100,
-    mas: { 5: rel[5] ? 101 : 99, 20: rel[20] ? 101 : 99, 65: rel[65] ? 101 : 99, 120: 100 },
-    rel: { ...rel },
+    price,
+    mas,
+    rel: { 5: ma5 > ma120, 20: ma20 > ma120, 65: ma65 > ma120 },
     candleOpenTime: closeTime - 100,
     candleCloseTime: closeTime,
   };
 }
 
-function baseline(position = 0, rel = { 5: false, 20: false, 65: false }) {
+function baseline(priceAboveMa120 = false) {
   return {
     initialized: true,
-    stableRelations: { ...rel },
-    candidates: {},
-    position,
-    dailyRelations: { ...rel },
+    strategyVersion: STRATEGY_VERSION,
+    priceAboveMa120,
+    position: priceAboveMa120 ? 1 : 0,
+    dailyPriceAboveMa120: false,
     lastClosedCandleCloseTime: 1_000,
   };
 }
 
-function run(state, rel, minuteIndex, closed = snapshot(undefined, 1_000)) {
-  return processMinute(state, { live: snapshot(rel), closed, minuteKey: MINUTES[minuteIndex] });
+function run(state, live, minuteIndex = 0, closed = snapshot()) {
+  return processMinute(state, { live, closed, minuteKey: MINUTES[minuteIndex] });
 }
 
-test("1. 관계 변화가 없으면 Telegram 이벤트가 없다", () => {
-  assert.deepEqual(run(baseline(), { 5: false, 20: false, 65: false }, 0).events, []);
+test("변화가 없으면 Telegram 이벤트가 없다", () => {
+  const result = run(baseline(false), snapshot({ price: 99, ma120: 100 }));
+  assert.deepEqual(result.events, []);
+  assert.equal(result.state.position, 0);
 });
 
-test("2, 5. MA5 아래→위 즉시 1회, 같은 상태에서는 중복 없음", () => {
-  let result = run(baseline(), { 5: true, 20: false, 65: false }, 0);
-  assert.deepEqual(result.events.map((event) => event.type), ["intraday-immediate"]);
-  result = run(result.state, { 5: true, 20: false, 65: false }, 1);
+test("현재가가 MA120을 상승돌파하면 즉시 매수 100% 알림을 한 번 생성한다", () => {
+  let result = run(baseline(false), snapshot({ price: 101, ma120: 100 }), 0);
+  assert.deepEqual(result.events.map((event) => event.type), ["price-ma120-cross"]);
+  assert.match(result.events[0].text, /상승돌파/);
+  assert.match(result.events[0].text, /매수·보유 \(100%\)/);
+  assert.match(result.events[0].text, /MA120 대비 \+1\.00%/);
+  assert.equal(result.state.position, 1);
+
+  result = run(result.state, snapshot({ price: 102, ma120: 100 }), 1);
   assert.deepEqual(result.events, []);
 });
 
-test("3. 교차 직후 원복하면 3분 유지 알림이 없다", () => {
-  const first = run(baseline(), { 5: true, 20: false, 65: false }, 0);
-  const reverted = run(first.state, { 5: false, 20: false, 65: false }, 1);
-  assert.deepEqual(reverted.events, []);
-  assert.equal(reverted.state.candidates[5], undefined);
+test("현재가가 MA120을 하락돌파하면 즉시 매도 0% 알림을 한 번 생성한다", () => {
+  const result = run(baseline(true), snapshot({ price: 99, ma120: 100 }));
+  assert.deepEqual(result.events.map((event) => event.type), ["price-ma120-cross"]);
+  assert.match(result.events[0].text, /하락돌파/);
+  assert.match(result.events[0].text, /매도·미보유 \(0%\)/);
+  assert.match(result.events[0].text, /MA120 대비 -1\.00%/);
+  assert.equal(result.state.position, 0);
 });
 
-test("4, 5. 3회 연속 유지 시 확인 알림 1회 후 추가 중복 없음", () => {
-  let result = run(baseline(), { 5: true, 20: false, 65: false }, 0);
-  result = run(result.state, { 5: true, 20: false, 65: false }, 1);
-  result = run(result.state, { 5: true, 20: false, 65: false }, 2);
-  assert.deepEqual(result.events.map((event) => event.type), ["intraday-confirmed"]);
-  assert.equal(result.state.position, 0.5);
-  result = run(result.state, { 5: true, 20: false, 65: false }, 3);
+test("MA5·20·65가 MA120을 교차해도 현재가 관계가 같으면 매매 알림이 없다", () => {
+  const result = run(
+    baseline(true),
+    snapshot({ price: 110, ma120: 100, ma5: 101, ma20: 102, ma65: 103 }),
+  );
   assert.deepEqual(result.events, []);
+  assert.equal(result.state.position, 1);
 });
 
-test("6~10. app.py 이벤트 기반 부분매도 비중 전이와 일치한다", () => {
-  let position = 0;
-  for (const [period, direction, expected] of [
-    [5, true, 0.5], [20, true, 0.75], [65, true, 1],
-    [5, false, 0.5], [20, false, 0.25], [65, false, 0],
-  ]) {
-    position = applyPositionEvents(position, [{ period, direction }]);
-    assert.equal(position, expected);
-  }
+test("같은 분 중복 실행은 돌파 알림과 상태를 중복 처리하지 않는다", () => {
+  const first = run(baseline(false), snapshot({ price: 101, ma120: 100 }), 0);
+  const duplicate = run(first.state, snapshot({ price: 101, ma120: 100 }), 0);
+  assert.equal(duplicate.duplicate, true);
+  assert.deepEqual(duplicate.events, []);
+  assert.equal(duplicate.state.position, 1);
 });
 
-test("MA20 하향 시 MA5가 위여도 실제 position은 최대 25%가 된다", () => {
-  let state = baseline(0.5, { 5: true, 20: true, 65: false });
-  const observed = { 5: true, 20: false, 65: false };
-  state = run(state, observed, 0).state;
-  state = run(state, observed, 1).state;
-  state = run(state, observed, 2).state;
-  assert.equal(state.position, 0.25);
-});
+test("기존 MA 교차 전략 상태는 현재가/MA120 기준으로 한 번만 안전하게 전환한다", () => {
+  const oldState = {
+    initialized: true,
+    stableRelations: { 5: true, 20: false, 65: false },
+    candidates: { 5: { streak: 2 } },
+    dailyRelations: { 5: true, 20: false, 65: false },
+    position: 0.5,
+    lastClosedCandleCloseTime: 1_000,
+  };
+  const migrated = run(oldState, snapshot({ price: 101, ma120: 100 }));
+  assert.deepEqual(migrated.events.map((event) => event.type), ["strategy-start"]);
+  assert.equal(migrated.state.strategyVersion, STRATEGY_VERSION);
+  assert.equal(migrated.state.priceAboveMa120, true);
+  assert.equal(migrated.state.position, 1);
+  assert.equal(migrated.state.stableRelations, undefined);
+  assert.equal(migrated.state.candidates, undefined);
 
-test("app.py처럼 MA65 하향일에는 같은 관측의 상향 신호를 무시한다", () => {
-  assert.equal(applyPositionEvents(1, [
-    { period: 65, direction: false },
-    { period: 5, direction: true },
-  ]), 0);
-});
-
-test("11. 09:01~09:02 실행이어도 closeTime 변화로 일봉 알림은 한 번만 생성된다", () => {
-  const delayed = processMinute(baseline(), {
-    live: snapshot(), closed: snapshot(undefined, 2_000), minuteKey: "2026-08-25T00:02",
-  });
-  assert.deepEqual(delayed.events.map((event) => event.type), ["daily-close"]);
-  const next = processMinute(delayed.state, {
-    live: snapshot(), closed: snapshot(undefined, 2_000), minuteKey: "2026-08-25T00:03",
-  });
+  const next = run(migrated.state, snapshot({ price: 101, ma120: 100 }), 1);
   assert.deepEqual(next.events, []);
 });
 
-test("12. 같은 분 중복 실행은 후보 streak와 이벤트를 중복 처리하지 않는다", () => {
-  const first = run(baseline(), { 5: true, 20: false, 65: false }, 0);
-  const duplicate = run(first.state, { 5: true, 20: false, 65: false }, 0);
-  assert.equal(duplicate.duplicate, true);
-  assert.equal(duplicate.state.candidates[5].streak, 1);
-  assert.deepEqual(duplicate.events, []);
+test("09:01~09:02 지연 실행에도 종가 알림은 한 번이며 MA120 대비 등락률을 표시한다", () => {
+  const delayed = run(
+    baseline(false),
+    snapshot({ price: 101, ma120: 100 }),
+    1,
+    snapshot({ price: 98, ma120: 100, closeTime: 2_000 }),
+  );
+  assert.deepEqual(delayed.events.map((event) => event.type), ["price-ma120-cross", "daily-close"]);
+  assert.match(delayed.events[1].text, /MA120 대비 -2\.00%/);
+
+  const next = run(
+    delayed.state,
+    snapshot({ price: 101, ma120: 100 }),
+    2,
+    snapshot({ price: 98, ma120: 100, closeTime: 2_000 }),
+  );
+  assert.deepEqual(next.events, []);
 });
 
-test("13. Telegram 실패 시 sent 처리하지 않고 재시도 상태로 되돌린다", async () => {
+test("MA120 대비 등락률을 정확히 계산한다", () => {
+  assert.ok(Math.abs(distancePercent(101, 100) - 1) < 1e-10);
+  assert.ok(Math.abs(distancePercent(98, 100) + 2) < 1e-10);
+});
+
+test("Telegram 실패 시 sent 처리하지 않고 재시도 상태로 되돌린다", async () => {
   let markedSent = false;
   let retryError;
   const status = await deliverClaimedEvent({ id: "event-1", text: "test" }, {

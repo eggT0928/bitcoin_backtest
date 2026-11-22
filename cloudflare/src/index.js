@@ -181,6 +181,12 @@ async function runMonitor(env, scheduledTime = Date.now()) {
 }
 
 export default {
+  async fetch() {
+    return new Response("BTC Telegram monitor is running.", {
+      status: 200,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+  },
   async scheduled(controller, env, context) {
     context.waitUntil(runMonitor(env, controller.scheduledTime));
   },
